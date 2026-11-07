@@ -1,6 +1,7 @@
 """Interactive agent subcommand."""
 
 import asyncio
+import json
 import logging
 import os
 import socket
@@ -66,8 +67,14 @@ def handle(cli, args):
     if resume_id:
         try:
             session = store.load(resume_id)
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError:
             cli.console.print(f"[red]Session {resume_id} not found.[/red]")
+            return
+        except json.JSONDecodeError:
+            cli.console.print(f"[red]Session {resume_id} is corrupt.[/red]")
+            return
+        except (TypeError, ValueError):
+            cli.console.print(f"[red]Session {resume_id} could not be loaded.[/red]")
             return
         cli.console.print(f"[green]Resuming session {session.session_id}[/green]")
         args.target = session.target
@@ -138,18 +145,7 @@ def _preflight_check(cli, args) -> bool:
 def _run_tui(cli, args, session=None):
     """Launch the Textual TUI."""
     session_id = session.session_id if session else None
-
-    app_class = ClearwingApp
-    if session and session.messages:
-        class _ResumingClearwingApp(ClearwingApp):
-            def on_mount(self):
-                super().on_mount()
-                state = self._agent_graph.get_state(self._agent_config)
-                state.values.setdefault("messages", []).extend(session.messages)
-
-        app_class = _ResumingClearwingApp
-
-    app = app_class(
+    app = ClearwingApp(
         target=args.target,
         model=args.model,
         session_id=session_id,
@@ -284,7 +280,7 @@ def _run_interactive_legacy(cli, args, session=None):
                                         approved = Confirm.ask(
                                             f"[bold yellow]APPROVAL REQUIRED:[/bold yellow] {prompt}"
                                         )
-                                    except KeyboardInterrupt:
+                                    except (EOFError, KeyboardInterrupt):
                                         cli.console.print("\n[yellow]Interrupted.[/yellow]")
                                         approved = False
                                     input_msg = Command(resume=approved)
