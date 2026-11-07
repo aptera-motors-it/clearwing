@@ -329,10 +329,9 @@ class ClearwingApp(App):
             try:
                 got_response = False
                 last_msg_count = 0
-                async for event in self._agent_graph.astream(
-                    input_msg, self._agent_config, stream_mode="values"
+                async for event in self._gated(
+                    self._agent_graph.astream(input_msg, self._agent_config, stream_mode="values")
                 ):
-                    await self._resume_gate.wait()
                     msgs = event.get("messages", [])
                     if len(msgs) <= last_msg_count:
                         continue
@@ -379,8 +378,8 @@ class ClearwingApp(App):
                                 await self._resume_gate.wait()
                                 resume_input = Command(resume=approved)
                                 resume_msg_count = 0
-                                async for ev in self._agent_graph.astream(
-                                    resume_input, self._agent_config
+                                async for ev in self._gated(
+                                    self._agent_graph.astream(resume_input, self._agent_config)
                                 ):
                                     msgs = ev.get("messages", [])
                                     if len(msgs) <= resume_msg_count:
@@ -408,6 +407,16 @@ class ClearwingApp(App):
     # ------------------------------------------------------------------
     # Key binding actions
     # ------------------------------------------------------------------
+
+    async def _gated(self, stream):
+        """Yield from *stream*, waiting out any pause before each pull."""
+        events = aiter(stream)
+        while True:
+            await self._resume_gate.wait()
+            try:
+                yield await anext(events)
+            except StopAsyncIteration:
+                return
 
     def action_toggle_pause(self) -> None:
         self.paused = not self.paused

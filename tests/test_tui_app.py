@@ -23,13 +23,17 @@ class _Msg:
 class FakeGraph:
     """Streams scripted events; optionally ends a turn on an approval interrupt."""
 
-    def __init__(self, events=None, interrupt=False, values=None):
+    def __init__(self, events=None, interrupt=False, values=None, resume_events=None):
         self.events = events or [{"messages": [_Msg("one")]}]
         self.interrupt = interrupt
         self.values = values or {}
         self.astream_calls = []
         self.resume_values = []
         self.pulled = 0
+        self.resume_pulled = 0
+        self.on_pull = None
+        self.on_resume_pull = None
+        self.resume_events = resume_events or [{"messages": [_Msg("done")]}]
         self.turn_started = asyncio.Event()
 
     async def astream(self, inp, config, stream_mode=None):
@@ -37,11 +41,17 @@ class FakeGraph:
         if hasattr(inp, "resume"):
             self.resume_values.append(inp.resume)
             self.interrupt = False
-            yield {"messages": [_Msg("done")]}
+            for ev in self.resume_events:
+                self.resume_pulled += 1
+                if self.on_resume_pull:
+                    self.on_resume_pull(self.resume_pulled)
+                yield ev
             return
         self.turn_started.set()
         for ev in self.events:
             self.pulled += 1
+            if self.on_pull:
+                self.on_pull(self.pulled)
             yield ev
             await asyncio.sleep(0)
 
@@ -161,3 +171,63 @@ async def test_resume_remembers_the_conversation(monkeypatch, tmp_path):
         {"role": "user", "content": "what is the scope?"},
     ]
     assert [s.session_id for s in store.list_sessions()] == [session.session_id]
+
+
+@pytest.mark.asyncio
+async def test_pause_pressed_while_handling_an_event_pulls_no_further_event(monkeypatch):
+    graph = FakeGraph(events=[{"messages": [_Msg(str(i))] * (i + 1)} for i in range(4)])
+    app = _app(monkeypatch, graph)
+    async with app.run_test() as pilot:
+        feed = app.query_one(ActivityFeed)
+        original = feed.add_message
+
+        def pause_on_first_reply(text, kind="info"):
+            original(text, kind)
+            if text == "0":
+                app.action_toggle_pause()
+
+        monkeypatch.setattr(feed, "add_message", pause_on_first_reply)
+        app.submit_input("scan it")
+        await _settle()
+        assert graph.pulled == 1
+        app.action_toggle_pause()
+        await _settle()
+        assert graph.pulled == 4
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_pause_mid_approval_resume_stream_stops_the_loop(monkeypatch):
+    graph = FakeGraph(
+        interrupt=True,
+        resume_events=[{"messages": [_Msg(str(i))] * (i + 1)} for i in range(3)],
+    )
+    app = _app(monkeypatch, graph)
+    graph.on_resume_pull = lambda n: app.action_toggle_pause() if n == 1 else None
+    async with app.run_test() as pilot:
+        app.submit_input("scan it")
+        await _settle()
+        app.submit_input("yes")
+        await _settle()
+        assert graph.resume_pulled == 1
+        app.action_toggle_pause()
+        await _settle()
+        assert graph.resume_pulled == 3
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_approved_resume_waits_until_unpaused(monkeypatch):
+    graph = FakeGraph(interrupt=True)
+    app = _app(monkeypatch, graph)
+    async with app.run_test() as pilot:
+        app.submit_input("scan it")
+        await _settle()
+        app.action_toggle_pause()
+        app.submit_input("yes")
+        await _settle()
+        assert graph.resume_values == []
+        app.action_toggle_pause()
+        await _settle()
+        assert graph.resume_values == [True]
+        await pilot.pause()
