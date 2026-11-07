@@ -112,6 +112,7 @@ class CoreEngine:
 
         except Exception as e:
             self.scan_result.state = ScanState.ERROR
+            self.scan_result.end_time = datetime.now()
             self.scan_result.errors.append(str(e))
             self.logger.error(f"Scan error: {e}")
 

@@ -1,7 +1,14 @@
 """Tests for offline base-image pre-staging (Recursive SourceHunt §7)."""
 
 from dataclasses import dataclass
+from io import StringIO
+from types import SimpleNamespace
 
+from rich.console import Console
+
+import clearwing.sandbox.backend as backend_mod
+import clearwing.sandbox.offline_bundle as ob
+import clearwing.ui.commands.prestage as cmd
 from clearwing.sandbox.image_prestage import (
     DEFAULT_BASE_IMAGE_TAGS,
     ImagePinStore,
@@ -150,3 +157,51 @@ def test_store_round_trip(tmp_path=None):
 def test_default_tags_cover_all_profiles():
     m = _manifest()
     assert set(m.pins) == set(DEFAULT_BASE_IMAGE_TAGS)
+
+
+def test_partial_failure_does_not_skip_daily_retry(tmp_path):
+    store = ImagePinStore(path=tmp_path / "pins.json")
+    d_fail_rust = _FakeDocker(pull_fail={DEFAULT_BASE_IMAGE_TAGS["rust"]})
+    r1 = run_prestage(store, process=d_fail_rust, env={}, now=lambda: 1000.0)
+    assert not r1.ok and "rust" in r1.failed
+
+    d_all_ok = _FakeDocker(present=d_fail_rust.present, digests=d_fail_rust.digests)
+    r2 = run_prestage(store, process=d_all_ok, env={}, now=lambda: 1000.0 + 3600)
+    assert not r2.skipped_daily
+    assert r2.ok and "rust" in r2.staged
+
+
+def test_prestage_export_reports_written_bundle(monkeypatch, tmp_path):
+    store = ImagePinStore(path=tmp_path / "pins.json")
+    monkeypatch.setattr(
+        cmd, "run_prestage", lambda *a, **k: SimpleNamespace(failed={}, staged=["python"], reused=[])
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "DockerSandboxBackend",
+        lambda *a, **k: SimpleNamespace(
+            build_offline_image=lambda *a, **k: "clearwing-sandbox-offline:python",
+            _all_feature_packages=lambda: [],
+        ),
+    )
+    monkeypatch.setattr(
+        ob, "export_bundle", lambda out, **k: ob.BundleManifest(entries=[], created_at=1.0)
+    )
+
+    buf = StringIO()
+    console = Console(file=buf, force_terminal=False)
+    args = SimpleNamespace(
+        pin_path=str(store.path),
+        import_dir=None,
+        export=str(tmp_path / "bundle"),
+        offline=False,
+        force=False,
+        profiles=None,
+        json=False,
+    )
+    try:
+        cmd._handle_export(console, store, args)
+        assert False, "expected SystemExit(0)"
+    except SystemExit as exc:
+        assert exc.code == 0
+    assert "Bundle ready:" in buf.getvalue()

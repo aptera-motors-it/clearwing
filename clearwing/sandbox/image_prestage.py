@@ -351,7 +351,11 @@ def run_prestage(
     manifest.ensure_defaults(tags)
 
     t = now()
-    if not force and not should_prestage(manifest, now=t, interval_seconds=interval_seconds):
+    if (
+        not force
+        and all(pin.is_staged() for pin in manifest.pins.values())
+        and not should_prestage(manifest, now=t, interval_seconds=interval_seconds)
+    ):
         return PreStageResult(skipped_daily=True)
 
     result = prestage_images(
@@ -362,9 +366,11 @@ def run_prestage(
         offline=offline,
         profiles=profiles,
     )
-    # Record the daily timestamp only when at least one image is usable, so a
-    # fully-failed run (e.g. offline with nothing staged) is retried next time.
-    if result.staged or result.reused:
+    if (
+        result.ok
+        and (result.staged or result.reused)
+        and all(pin.is_staged() for pin in manifest.pins.values())
+    ):
         manifest.last_prestage_at = t
     store.save(manifest)
     return result

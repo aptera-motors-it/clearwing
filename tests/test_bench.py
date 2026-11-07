@@ -10,12 +10,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from clearwing.bench.crash_classifier import (
-    CrashClassification,
     CrashClassifier,
 )
 from clearwing.bench.ossfuzz import (
+    BENCHMARK_HUNT_PROMPT,
     BENCHMARK_MODES,
-    BenchmarkMode,
     BenchmarkTarget,
     OssFuzzBenchmark,
     load_corpus_dir,
@@ -32,7 +31,7 @@ from clearwing.bench.results import (
     load_result,
     save_result,
 )
-
+from clearwing.ui.commands import bench
 
 # --- CrashClassifier tests ---------------------------------------------------
 
@@ -313,9 +312,35 @@ class TestOssFuzzBenchmark:
         assert targets[2].project_name == "libjpeg"
 
     def test_benchmark_prompt_has_placeholders(self):
-        from clearwing.bench.ossfuzz import BENCHMARK_HUNT_PROMPT
         assert "{project_name}" in BENCHMARK_HUNT_PROMPT
         assert "{entry_point_line}" in BENCHMARK_HUNT_PROMPT
+
+    def test_load_targets_file_rejects_unsafe_project_name(self, tmp_path):
+        for bad_name in ("/tmp/victim/abs_pwned", "../victim/rel_pwned", "", ".", "..", "a/b", "a\\b"):
+            catalog = tmp_path / "targets.json"
+            catalog.write_text(
+                json.dumps([{"project_name": bad_name, "repo_path": "/nonexistent", "entry_points": [""]}]),
+                encoding="utf-8",
+            )
+            with pytest.raises(ValueError, match="Unsafe benchmark project_name"):
+                load_targets_file(str(catalog))
+
+    @pytest.mark.asyncio
+    async def test_arun_confines_project_name_to_output_dir(self, tmp_path):
+        out_dir = tmp_path / "out"
+        victim_dir = tmp_path / "victim"
+        victim_dir.mkdir()
+
+        bench = OssFuzzBenchmark(llm=MagicMock(), mode="quick", output_dir=str(out_dir), llm_classify=False)
+        for bad_name in (str(victim_dir / "abs_pwned"), "../victim/rel_pwned"):
+            with pytest.raises(ValueError, match="Unsafe benchmark project_name"):
+                await bench.arun([BenchmarkTarget(project_name=bad_name, repo_path="/nonexistent")])
+
+        assert list(victim_dir.iterdir()) == []
+
+        res = await bench.arun([BenchmarkTarget(project_name="safe_proj", repo_path="/nonexistent")])
+        assert res.targets_attempted == 1
+        assert (out_dir / "safe_proj.json").is_file()
 
 
 # --- CLI tests ----------------------------------------------------------------
@@ -325,7 +350,6 @@ class TestBenchCLI:
     def test_bench_ossfuzz_flag(self):
         import argparse
 
-        from clearwing.ui.commands import bench
 
         parser = argparse.ArgumentParser()
         subs = parser.add_subparsers()
@@ -336,7 +360,6 @@ class TestBenchCLI:
     def test_bench_ossfuzz_mode(self):
         import argparse
 
-        from clearwing.ui.commands import bench
 
         parser = argparse.ArgumentParser()
         subs = parser.add_subparsers()
@@ -347,7 +370,6 @@ class TestBenchCLI:
     def test_bench_compare_flag(self):
         import argparse
 
-        from clearwing.ui.commands import bench
 
         parser = argparse.ArgumentParser()
         subs = parser.add_subparsers()
@@ -359,7 +381,6 @@ class TestBenchCLI:
     def test_bench_compare_format(self):
         import argparse
 
-        from clearwing.ui.commands import bench
 
         parser = argparse.ArgumentParser()
         subs = parser.add_subparsers()
@@ -372,7 +393,6 @@ class TestBenchCLI:
     def test_bench_no_llm_classify(self):
         import argparse
 
-        from clearwing.ui.commands import bench
 
         parser = argparse.ArgumentParser()
         subs = parser.add_subparsers()

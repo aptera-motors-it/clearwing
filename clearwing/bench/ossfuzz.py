@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -106,6 +106,15 @@ def load_corpus_dir(path: str) -> list[BenchmarkTarget]:
     return targets
 
 
+def _safe_result_stem(name: str) -> str:
+    if not isinstance(name, str):
+        raise ValueError(f"Unsafe benchmark project_name: {name!r}")
+    stem = Path(name).name.strip()
+    if not stem or stem in {".", ".."} or "/" in name or "\\" in name or Path(name).is_absolute():
+        raise ValueError(f"Unsafe benchmark project_name: {name!r}")
+    return stem
+
+
 def load_targets_file(path: str) -> list[BenchmarkTarget]:
     """Load benchmark targets from a JSON file."""
     text = Path(path).read_text(encoding="utf-8")
@@ -116,7 +125,7 @@ def load_targets_file(path: str) -> list[BenchmarkTarget]:
         if isinstance(item, dict):
             entry_points = item.get("entry_points", [""])
             repo = item.get("repo_path", item.get("repo", ""))
-            project = item.get("project_name", item.get("project", ""))
+            project = _safe_result_stem(item.get("project_name", item.get("project", "")))
             lang = item.get("language", "c")
             for ep in entry_points:
                 targets.append(BenchmarkTarget(
@@ -196,7 +205,10 @@ class OssFuzzBenchmark:
             ))
 
             # Write per-target result immediately for resumability
-            target_file = out_dir / f"{target.project_name}.json"
+            stem = _safe_result_stem(target.project_name)
+            target_file = (out_dir / f"{stem}.json").resolve()
+            if not str(target_file).startswith(str(out_dir.resolve()) + os.sep):
+                raise ValueError(f"Refusing to write outside output dir: {target_file}")
             try:
                 target_file.write_text(
                     json.dumps({

@@ -188,8 +188,7 @@ def _handle_export(console, store, args) -> None:
         console.print_json(json.dumps(bundle.to_dict()))
     else:
         console.print(
-            f"[green]Bundle ready:[/] {len(bundle.entries)} images, "
-            f"sha256={bundle.images_sha256[:16]}… → {args.export}\n"
+            f"[green]Bundle ready:[/] {len(bundle.entries)} images → {args.export}\n"
             "Transfer the whole directory one-way (removable media / data diode), "
             "then run `clearwing prestage --import DIR` on the closed host."
         )
