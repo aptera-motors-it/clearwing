@@ -12,6 +12,7 @@ from clearwing.sandbox.backend import (
     SandboxRunConfig,
 )
 from clearwing.sandbox.kubernetes import KubernetesSandbox, KubernetesSandboxBackend
+from clearwing.sourcehunt.runner import SourceHuntRunner
 
 
 def test_kubernetes_backend_implements_contract():
@@ -61,6 +62,104 @@ def test_pod_lifecycle(monkeypatch):
     sandbox.stop()
     api.delete_namespaced_pod.assert_called_once()
     assert sandbox.container_id is None
+
+
+def _running_api():
+    api = MagicMock()
+    api.read_namespaced_pod_status.return_value = SimpleNamespace(
+        status=SimpleNamespace(phase="Running")
+    )
+    return api
+
+
+def test_pod_network_is_denied_before_the_pod_is_created(monkeypatch):
+    client = pytest.importorskip("kubernetes.client")
+    api = _running_api()
+    networking = MagicMock()
+    monkeypatch.setattr(client, "NetworkingV1Api", MagicMock(return_value=networking))
+    order = MagicMock()
+    order.attach_mock(networking.create_namespaced_network_policy, "policy")
+    order.attach_mock(api.create_namespaced_pod, "pod")
+    sandbox = KubernetesSandbox(
+        "sandbox:1", SandboxRunConfig(), namespace="jobs", api_factory=lambda: api
+    )
+
+    sandbox.start()
+
+    assert [name for name, _, _ in order.mock_calls] == ["policy", "pod"]
+    namespace, policy = networking.create_namespaced_network_policy.call_args.args
+    pod = api.create_namespaced_pod.call_args.args[1]
+    assert namespace == "jobs"
+    assert policy.spec.policy_types == ["Ingress", "Egress"]
+    assert policy.spec.egress is None
+    assert policy.spec.ingress is None
+    assert policy.spec.pod_selector.match_labels.items() <= pod.metadata.labels.items()
+
+    sandbox.stop()
+    networking.delete_namespaced_network_policy.assert_not_called()
+
+
+def test_existing_network_policy_is_replaced(monkeypatch):
+    client = pytest.importorskip("kubernetes.client")
+    api = _running_api()
+    networking = MagicMock()
+    networking.create_namespaced_network_policy.side_effect = client.ApiException(status=409)
+    monkeypatch.setattr(client, "NetworkingV1Api", MagicMock(return_value=networking))
+    sandbox = KubernetesSandbox(
+        "sandbox:1", SandboxRunConfig(), namespace="jobs", api_factory=lambda: api
+    )
+
+    sandbox.start()
+
+    name, namespace, policy = networking.replace_namespaced_network_policy.call_args.args
+    assert (name, namespace) == (policy.metadata.name, "jobs")
+    assert policy.spec.policy_types == ["Ingress", "Egress"]
+    api.create_namespaced_pod.assert_called_once()
+
+
+def test_pod_is_not_created_without_its_network_policy(monkeypatch):
+    client = pytest.importorskip("kubernetes.client")
+    api = _running_api()
+    networking = MagicMock()
+    networking.create_namespaced_network_policy.side_effect = RuntimeError("forbidden")
+    monkeypatch.setattr(client, "NetworkingV1Api", MagicMock(return_value=networking))
+    sandbox = KubernetesSandbox(
+        "sandbox:1", SandboxRunConfig(), namespace="jobs", api_factory=lambda: api
+    )
+
+    with pytest.raises(RuntimeError, match="forbidden"):
+        sandbox.start()
+    api.create_namespaced_pod.assert_not_called()
+
+
+def test_networked_config_is_rejected():
+    backend = KubernetesSandboxBackend(image="sandbox:1")
+    with pytest.raises(ValueError, match="network"):
+        backend.create("sandbox:1", SandboxRunConfig(network_mode="bridge"))
+
+
+@pytest.mark.parametrize(
+    ("network_mode", "allowed"), [("none", True), ("bridge", False), (None, False)]
+)
+def test_runner_verification_guard_reads_network_mode(tmp_path, network_mode, allowed):
+    config = (
+        SimpleNamespace() if network_mode is None else SandboxRunConfig(network_mode=network_mode)
+    )
+    sandbox = KubernetesSandbox("sandbox:1", config, namespace="jobs", api_factory=MagicMock)
+    sandbox.workspace_baseline_commit = "a" * 40
+    runner = SourceHuntRunner(
+        repo_url="test",
+        output_dir=str(tmp_path),
+        sandbox_factory=lambda **_: sandbox,
+        enable_calibration=False,
+        enable_mechanism_memory=False,
+        enable_patch_oracle=False,
+    )
+
+    verification_sandbox, _, tools = runner._verification_resources(str(tmp_path))
+
+    assert (verification_sandbox is sandbox) is allowed
+    assert bool(tools) is allowed
 
 
 def test_exit_code_parsing():

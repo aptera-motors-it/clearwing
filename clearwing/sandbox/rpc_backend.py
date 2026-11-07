@@ -424,12 +424,16 @@ class SocketSandboxInstance:
     def start(self) -> str:
         if self._sandbox_id is not None:
             return self._sandbox_id
+        config = asdict(self.config)
+        # Protocol v1 backends always disable networking, so the field stays off the wire.
+        if config.pop("network_mode") != "none":
+            raise ValueError("sandbox RPC backend only supports network_mode 'none'")
         result = _object(
             self._connection.call(
                 "sandbox.start",
                 {
                     "environment_ref": self._environment_ref,
-                    "config": asdict(self.config),
+                    "config": config,
                 },
             ),
             "sandbox.start",

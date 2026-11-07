@@ -63,6 +63,7 @@ class SandboxRunConfig:
     env: dict[str, str] = field(default_factory=dict)
     working_dir: str = "/workspace"
     pids_limit: int = 512
+    network_mode: str = "none"
 
 
 @runtime_checkable
@@ -571,7 +572,7 @@ RUN mkdir -p /scratch
             SandboxConfig(
                 image=environment_ref,
                 labels=labels,
-                network_mode="none",
+                network_mode=config.network_mode,
                 mounts=config.mounts,
                 memory_mb=config.memory_mb,
                 cpu_shares=1024,
