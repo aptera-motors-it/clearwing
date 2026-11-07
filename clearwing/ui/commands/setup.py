@@ -15,9 +15,11 @@ decision tree, not new file handling.
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 from typing import TYPE_CHECKING
 
+import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -430,8 +432,6 @@ def _write_config(
     merged default config (including the 1024-port scanning defaults),
     which would balloon the file to ~1000 lines for a 3-key write.
     """
-    import yaml
-
     provider_section: dict[str, str] = {}
     if preset.auth_flow:
         provider_section["auth"] = preset.auth_flow
@@ -449,6 +449,7 @@ def _write_config(
 
     path = cli.config.DEFAULT_CONFIG_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
 
     # Read existing file (if any), merge provider:, write back.
     existing: dict = {}
@@ -461,12 +462,25 @@ def _write_config(
             existing = {}
 
     existing["provider"] = provider_section
-    path.write_text(yaml.safe_dump(existing, default_flow_style=False, sort_keys=True))
+    _write_private_yaml(path, existing)
 
     # Keep the in-memory Config object in sync for the current process.
     cli.config.set("provider", value=provider_section)
 
     cli.console.print(f"\n[green]Wrote {path}[/green]")
+
+
+def _write_private_yaml(path, data: dict) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            yaml.safe_dump(data, stream, default_flow_style=False, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _maybe_configure_model_roles(cli, console: Console, primary: ProviderPreset) -> None:
@@ -524,10 +538,9 @@ def _maybe_configure_model_roles(cli, console: Console, primary: ProviderPreset)
 
 def _write_model_roles(cli, provider_keys: list[str]) -> None:
     """Merge a ``model_roles:`` block into config.yaml, preserving the rest."""
-    import yaml
-
     path = cli.config.DEFAULT_CONFIG_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
     existing: dict = {}
     if path.exists():
         try:
@@ -538,7 +551,7 @@ def _write_model_roles(cli, provider_keys: list[str]) -> None:
             existing = {}
     block = {"providers": provider_keys}
     existing["model_roles"] = block
-    path.write_text(yaml.safe_dump(existing, default_flow_style=False, sort_keys=True))
+    _write_private_yaml(path, existing)
     cli.config.set("model_roles", value=block)
 
 

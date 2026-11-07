@@ -1055,7 +1055,7 @@ def login_anthropic_oauth(
         print_fn("")
 
     verifier, challenge = generate_pkce()
-    state = verifier
+    state = create_state()
     auth_url = build_anthropic_authorize_url(
         challenge=challenge,
         state=state,
@@ -1081,13 +1081,13 @@ def login_anthropic_oauth(
 
     pasted = input_fn("Paste code: ").strip()
     code, parsed_state = parse_authorization_input(pasted)
-    if parsed_state and parsed_state != state:
+    if parsed_state != state:
         raise RuntimeError("State mismatch — paste the code from this login attempt.")
     if not code:
         raise RuntimeError("Missing authorization code.")
     creds = exchange_anthropic_authorization_code(
         code=code,
-        state=parsed_state or state,
+        state=state,
         verifier=verifier,
         redirect_uri=ANTHROPIC_OAUTH_MANUAL_REDIRECT_URI,
     )

@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import os
+import stat
+import urllib.parse
+from pathlib import Path
+
 import pytest
 import yaml
 
+from clearwing.providers import openai_oauth, preset_by_key
 from clearwing.safety.auth import (
     APIAuth,
     AuthConfig,
@@ -11,6 +17,8 @@ from clearwing.safety.auth import (
     FormLogin,
     OAuthConfig,
 )
+from clearwing.sourcehunt.artifact_store import ArtifactStore
+from clearwing.ui.commands.setup import _write_config
 
 # ---------------------------------------------------------------------------
 # Dataclass defaults
@@ -238,6 +246,132 @@ class TestAuthConfigLoaderSaveRoundTrip:
         assert reloaded.form.password == original.form.password
         assert reloaded.form.success_indicator == original.form.success_indicator
         assert reloaded.session_persistence == original.session_persistence
+
+    def test_save_is_atomic_and_owner_only(self, tmp_path, loader, monkeypatch):
+        original_replace = os.replace
+        temporary_modes = []
+
+        def inspect_replace(source, destination):
+            temporary_modes.append(stat.S_IMODE(Path(source).stat().st_mode))
+            original_replace(source, destination)
+
+        monkeypatch.setattr("clearwing.safety.auth.config.os.replace", inspect_replace)
+        config = AuthConfig(
+            target="http://10.0.0.1",
+            auth_type="form",
+            form=FormLogin(
+                url="http://10.0.0.1/login",
+                username="admin",
+                password="secret",
+            ),
+        )
+
+        loader.save(config)
+
+        saved_path = tmp_path / "http___10.0.0.1.yml"
+        assert temporary_modes == [0o600]
+        assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+        assert stat.S_IMODE(saved_path.stat().st_mode) == 0o600
+
+
+def test_setup_config_is_atomic_and_owner_only(tmp_path, monkeypatch):
+    class Config:
+        DEFAULT_CONFIG_PATH = tmp_path / ".clearwing" / "config.yaml"
+
+        def set(self, *_keys, value):
+            return None
+
+    class Console:
+        def print(self, *_args, **_kwargs):
+            return None
+
+    class CLI:
+        config = Config()
+        console = Console()
+
+    original_replace = os.replace
+    temporary_modes = []
+
+    def inspect_replace(source, destination):
+        temporary_modes.append(stat.S_IMODE(Path(source).stat().st_mode))
+        original_replace(source, destination)
+
+    monkeypatch.setattr("clearwing.ui.commands.setup.os.replace", inspect_replace)
+    _write_config(
+        CLI(),
+        preset_by_key("openrouter"),
+        base_url="https://openrouter.ai/api/v1",
+        api_key_literal="secret-api-key",
+        model="test-model",
+    )
+
+    path = Config.DEFAULT_CONFIG_PATH
+    assert temporary_modes == [0o600]
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_anthropic_oauth_state_is_independent_from_pkce(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(openai_oauth, "generate_pkce", lambda: ("verifier", "challenge"))
+    monkeypatch.setattr(openai_oauth, "create_state", lambda: "independent-state")
+    monkeypatch.setattr(openai_oauth, "save_anthropic_oauth_credentials", lambda _creds: None)
+
+    def exchange(**kwargs):
+        captured.update(kwargs)
+        return openai_oauth.AnthropicOAuthCredentials(token="sk-ant-test-token")
+
+    monkeypatch.setattr(openai_oauth, "exchange_anthropic_authorization_code", exchange)
+    printed = []
+
+    openai_oauth.login_anthropic_oauth(
+        no_open=True,
+        input_fn=lambda _prompt: "authorization-code#independent-state",
+        print_fn=printed.append,
+    )
+
+    authorize_url = next(line.strip() for line in printed if "claude.ai/oauth/authorize" in line)
+    state = urllib.parse.parse_qs(urllib.parse.urlparse(authorize_url).query)["state"][0]
+    assert state == "independent-state"
+    assert state != "verifier"
+    assert captured["state"] == "independent-state"
+    assert captured["verifier"] == "verifier"
+
+    with pytest.raises(RuntimeError, match="State mismatch"):
+        openai_oauth.login_anthropic_oauth(
+            no_open=True,
+            input_fn=lambda _prompt: "authorization-code",
+            print_fn=lambda _line: None,
+        )
+
+
+def test_artifact_master_key_is_atomically_written_owner_only(tmp_path, monkeypatch):
+    original_replace = os.replace
+    temporary_modes = []
+
+    def inspect_replace(source, destination):
+        temporary_modes.append(stat.S_IMODE(Path(source).stat().st_mode))
+        original_replace(source, destination)
+
+    monkeypatch.setattr("clearwing.sourcehunt.artifact_store.os.replace", inspect_replace)
+
+    ArtifactStore(base_dir=tmp_path)
+
+    key_path = tmp_path / "keys" / "master.key"
+    assert temporary_modes == [0o600]
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+
+
+def test_artifact_master_key_repairs_existing_mode(tmp_path):
+    key_path = tmp_path / "keys" / "master.key"
+    key_path.parent.mkdir(parents=True)
+    key_path.write_bytes(b"k" * 32)
+    key_path.chmod(0o644)
+
+    ArtifactStore(base_dir=tmp_path)
+
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
 
 
 class TestResolveEnv:
