@@ -136,3 +136,28 @@ async def test_resume_keeps_findings(monkeypatch, tmp_path):
         app2.submit_input("continue")
         await _settle()
     assert graph2.astream_calls[0]["open_ports"] == found
+
+
+@pytest.mark.asyncio
+async def test_resume_remembers_the_conversation(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLEARWING_HOME", str(tmp_path))
+    store = SessionStore()
+    session = store.create(target="10.0.0.1", model="m")
+
+    graph = FakeGraph(events=[{"messages": [_Msg("noted")]}])
+    app = _app(monkeypatch, graph, session.session_id)
+    async with app.run_test():
+        app.submit_input("scope is 10.0.0.0/24 only")
+        await _settle()
+
+    graph2 = FakeGraph()
+    app2 = _app(monkeypatch, graph2, session.session_id)
+    async with app2.run_test():
+        app2.submit_input("what is the scope?")
+        await _settle()
+    assert graph2.astream_calls[0]["messages"] == [
+        {"role": "user", "content": "scope is 10.0.0.0/24 only"},
+        {"role": "assistant", "content": "noted"},
+        {"role": "user", "content": "what is the scope?"},
+    ]
+    assert [s.session_id for s in store.list_sessions()] == [session.session_id]

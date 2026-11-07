@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 from textual.app import App, ComposeResult
@@ -81,6 +82,7 @@ class ClearwingApp(App):
         self._approval_queue: asyncio.Queue[str] = asyncio.Queue()
         self._agent_graph = None
         self._awaiting_approval = False
+        self._conversation: list[dict] = []
         self._resume_gate = asyncio.Event()
         self._resume_gate.set()
 
@@ -306,6 +308,8 @@ class ClearwingApp(App):
         if self.target:
             initial_state["target"] = self.target
         initial_state.update(self._saved_findings())
+        self._conversation = self._saved_conversation()
+        prior_messages = list(self._conversation)
 
         while True:
             user_text = await self._user_input_queue.get()
@@ -315,7 +319,10 @@ class ClearwingApp(App):
             feed.add_message(f"You: {user_text}", "info")
             feed.add_message("Thinking...", "warning")
 
-            input_msg: dict = {"messages": [{"role": "user", "content": user_text}]}
+            new_message = {"role": "user", "content": user_text}
+            self._conversation.append(new_message)
+            input_msg: dict = {"messages": [*prior_messages, new_message]}
+            prior_messages = []
             input_msg.update(initial_state)
             initial_state = {}
 
@@ -340,6 +347,7 @@ class ClearwingApp(App):
                         text = extract_text_content(last.content)
                         if text:
                             feed.add_message(text, "success")
+                            self._conversation.append({"role": "assistant", "content": text})
                             got_response = True
 
                 if not got_response:
@@ -388,6 +396,9 @@ class ClearwingApp(App):
                                         text = extract_text_content(last.content)
                                         if text:
                                             feed.add_message(text, "success")
+                                            self._conversation.append(
+                                                {"role": "assistant", "content": text}
+                                            )
 
                 self._save_findings()
             except Exception as exc:
@@ -463,10 +474,26 @@ class ClearwingApp(App):
             return {}
         return {key: getattr(session, key) for key in _FINDING_KEYS}
 
+    def _conversation_path(self):
+        # Not *.json: SessionStore.list_sessions globs that pattern.
+        return SessionStore().BASE_DIR / f"{self.session_id}.conversation"
+
+    def _saved_conversation(self) -> list[dict]:
+        if not self.session_id:
+            return []
+        try:
+            return json.loads(self._conversation_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+
     def _save_findings(self) -> None:
         if not (self.session_id and self._agent_graph):
             return
         try:
+            if self._conversation:
+                self._conversation_path().write_text(
+                    json.dumps(self._conversation), encoding="utf-8"
+                )
             values = self._agent_graph.get_state(self._agent_config).values
             store = SessionStore()
             session = store.load(self.session_id)
