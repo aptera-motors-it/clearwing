@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -93,6 +94,7 @@ class AuthConfigLoader:
 
             self.CONFIG_DIR = clearwing_home() / "auth"
         self.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.CONFIG_DIR, 0o700)
 
     def load(self, path: str) -> AuthConfig:
         """Load an auth config from a YAML file."""
@@ -131,7 +133,21 @@ class AuthConfigLoader:
             path = str(self.CONFIG_DIR / f"{safe_target}.yml")
 
         data = self._serialize(config)
-        Path(path).write_text(yaml.dump(data, default_flow_style=False), encoding="utf-8")
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            dir=destination.parent,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                yaml.dump(data, stream, default_flow_style=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def _parse(self, raw: dict) -> AuthConfig:
         """Parse raw YAML dict into AuthConfig."""

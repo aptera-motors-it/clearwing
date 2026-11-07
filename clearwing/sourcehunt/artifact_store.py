@@ -76,11 +76,23 @@ class ArtifactStore:
 
         key_path = self._base_dir / "keys" / "master.key"
         if key_path.exists():
+            os.chmod(key_path, 0o600)
             self._key = key_path.read_bytes()
         else:
             self._key = os.urandom(32)
-            key_path.write_bytes(self._key)
-            os.chmod(key_path, 0o600)
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=".master.key.",
+                dir=key_path.parent,
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(self._key)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, key_path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
 
     def _encrypt(self, data: bytes) -> bytes:
         if not self._policy.encryption_at_rest:
