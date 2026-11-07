@@ -92,4 +92,5 @@ def test_proof_flow_rejects_semgrep_instead_of_ignoring_it(tmp_path) -> None:
 def test_container_installs_sourcehunt_extra() -> None:
     dockerfile = (Path(__file__).parents[1] / "Dockerfile").read_text()
 
-    assert "uv pip install --system --no-cache --extra sourcehunt -r pyproject.toml" in dockerfile
+    assert "uv export --frozen --extra sourcehunt" in dockerfile
+    assert "uv pip install --system --no-cache --exact -r requirements.txt" in dockerfile

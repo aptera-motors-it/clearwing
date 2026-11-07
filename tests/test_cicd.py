@@ -2,9 +2,50 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 from clearwing.runners.cicd import CICDResult, CICDRunner, SARIFGenerator
+
+REPO_ROOT = Path(__file__).parents[1]
+
+
+class TestSupplyChain:
+    def test_release_builds_resolve_from_uv_lock(self):
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+        workflow = yaml.safe_load(
+            (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
+        )
+
+        assert "uv export --frozen --extra sourcehunt" in dockerfile
+        assert "uv pip install --system --no-cache --exact -r requirements.txt" in dockerfile
+
+        install_steps = [
+            step["run"]
+            for job in workflow["jobs"].values()
+            for step in job["steps"]
+            if step.get("name") in {"Install package", "Install build dependencies"}
+        ]
+        assert install_steps
+        assert all("uv sync --frozen --all-extras" in command for command in install_steps)
+
+    def test_uv_image_is_pinned_by_version_and_digest(self):
+        dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+        uv_source = next(
+            line for line in dockerfile.splitlines() if "ghcr.io/astral-sh/uv:" in line
+        )
+
+        assert ":latest" not in uv_source
+        assert "@sha256:" in uv_source
+
+    def test_release_jobs_use_protected_environment(self):
+        workflow = yaml.safe_load(
+            (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
+        )
+
+        assert all(job.get("environment") == "release" for job in workflow["jobs"].values())
 
 
 class TestCICDResult:
