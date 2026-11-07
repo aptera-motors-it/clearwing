@@ -8,10 +8,13 @@ wargame/remediation tool pattern.
 from __future__ import annotations
 
 import logging
+import math
 import os
+from pathlib import Path
 from typing import Any
 
-from clearwing.agent.tooling import tool
+from clearwing.agent.tooling import interrupt, tool
+from clearwing.core.config import default_results_dir
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +29,7 @@ def hunt_source_code(
     repo_url_or_path: str,
     branch: str = "main",
     depth: str | None = None,
-    budget_usd: float = 0.0,
+    budget_usd: float = 5.0,
     output_dir: str | None = None,
     target_files: list[str] | None = None,
     target_window_lines: int = 480,
@@ -44,8 +47,8 @@ def hunt_source_code(
                'standard' (LLM hunters on rank A/B + verifier),
                'deep' (everything + Tier C propagation audit + exploit triage).
                Defaults to 'standard' with target_files, otherwise 'quick'.
-        budget_usd: Max dollars to spend. Defaults to unlimited; 0 means unlimited.
-        output_dir: Where to write the SARIF / markdown / JSON outputs.
+        budget_usd: Max dollars to spend. Must be greater than zero.
+        output_dir: Directory under the default sourcehunt results directory.
         target_files: Optional repository-relative files to hunt directly,
                       bypassing the ranker.
         target_window_lines: Lines per line-numbered target window (default 480).
@@ -54,6 +57,26 @@ def hunt_source_code(
         A human-readable summary with the top findings. Full reports are
         written to {output_dir}/{session_id}/.
     """
+    resolved_depth = depth or ("standard" if target_files else "quick")
+    if not math.isfinite(budget_usd) or budget_usd <= 0:
+        return "Refusing unlimited budget; pass budget_usd greater than zero."
+
+    sourcehunt_dir = Path(default_results_dir("sourcehunt")).expanduser().resolve()
+    requested_output_dir = Path(output_dir).expanduser() if output_dir else sourcehunt_dir
+    resolved_output_dir = (
+        requested_output_dir.resolve()
+        if requested_output_dir.is_absolute()
+        else (sourcehunt_dir / requested_output_dir).resolve()
+    )
+    if resolved_output_dir != sourcehunt_dir and sourcehunt_dir not in resolved_output_dir.parents:
+        return f"Refusing output directory outside sourcehunt results: {sourcehunt_dir}"
+
+    if resolved_depth != "quick" and not interrupt(
+        f"Approve source hunt of {repo_url_or_path} at depth={resolved_depth} "
+        f"with budget_usd={budget_usd} and output_dir={resolved_output_dir}?"
+    ):
+        return "Source hunt rejected by user."
+
     try:
         from clearwing.providers import ProviderManager, resolve_llm_endpoint
         from clearwing.sourcehunt.runner import SourceHuntRunner
@@ -72,9 +95,9 @@ def hunt_source_code(
             repo_url=repo_url_or_path,
             branch=branch,
             local_path=local_path,
-            depth=depth or ("standard" if target_files else "quick"),
+            depth=resolved_depth,
             budget_usd=budget_usd,
-            output_dir=output_dir,
+            output_dir=str(resolved_output_dir),
             target_files=target_files,
             target_window_lines=target_window_lines,
             provider_manager=provider_manager,

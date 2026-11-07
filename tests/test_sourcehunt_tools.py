@@ -30,8 +30,12 @@ def test_get_sourcehunt_tools_returns_two_tools():
     assert names == {"hunt_source_code", "list_sourcehunt_findings"}
 
 
-def test_hunt_source_code_runs_quick_against_local_fixture(tmp_path):
+def test_hunt_source_code_runs_quick_against_local_fixture(tmp_path, monkeypatch):
     """The @tool wrapper should run the runner end-to-end on a local path."""
+    monkeypatch.setattr(
+        "clearwing.agent.tools.meta.sourcehunt_tools.default_results_dir",
+        lambda _: str(tmp_path),
+    )
     summary = hunt_source_code.invoke(
         {
             "repo_url_or_path": str(FIXTURE_PY_SQLI),
@@ -47,8 +51,12 @@ def test_hunt_source_code_runs_quick_against_local_fixture(tmp_path):
     assert "CRITICAL" in summary or "Top findings" in summary
 
 
-def test_hunt_source_code_returns_summary_for_empty_repo(tmp_path):
+def test_hunt_source_code_returns_summary_for_empty_repo(tmp_path, monkeypatch):
     """An empty directory still produces a valid summary, not an error."""
+    monkeypatch.setattr(
+        "clearwing.agent.tools.meta.sourcehunt_tools.default_results_dir",
+        lambda _: str(tmp_path),
+    )
     empty = tmp_path / "empty_repo"
     empty.mkdir()
     summary = hunt_source_code.invoke(
@@ -63,8 +71,12 @@ def test_hunt_source_code_returns_summary_for_empty_repo(tmp_path):
     assert "Files ranked: 0" in summary
 
 
-def test_list_sourcehunt_findings_recalls_recent_run(tmp_path):
+def test_list_sourcehunt_findings_recalls_recent_run(tmp_path, monkeypatch):
     """After hunt_source_code runs, list_sourcehunt_findings returns the cache."""
+    monkeypatch.setattr(
+        "clearwing.agent.tools.meta.sourcehunt_tools.default_results_dir",
+        lambda _: str(tmp_path),
+    )
     # Clear the cache to start fresh
     _RECENT_SESSIONS.clear()
 

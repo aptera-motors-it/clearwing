@@ -32,7 +32,7 @@ class ReportGenerator:
             HTML string
         """
         template = self.jinja_env.get_template("attack_graph.html")
-        return template.render(graph_data=json.dumps(redact_tree(graph_data)))
+        return template.render(graph_data=redact_tree(graph_data))
 
     def generate(self, scan_result: Any, format: str = "text") -> str:
         """
