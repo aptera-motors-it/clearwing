@@ -17,15 +17,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import json
 import threading
 import time
 import urllib.request
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from clearwing.sourcehunt.webhook_server import (
     WebhookConfig,
     WebhookServer,
+    WebhookStats,
+    _Handler,
     commit_monitor_on_push_factory,
     parse_push_payload,
     verify_signature,
@@ -333,6 +337,63 @@ class TestLiveWebhookServer:
 
 
 # --- CommitMonitor integration factory ------------------------------------
+
+
+class _TrackingBody(io.BytesIO):
+    def __init__(self, data: bytes):
+        super().__init__(data)
+        self.read_sizes: list[int] = []
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        return super().read(size)
+
+
+def _post_handler(content_length: str, body: bytes):
+    handler = _Handler.__new__(_Handler)
+    handler.rfile = _TrackingBody(body)
+    handler.wfile = io.BytesIO()
+    handler.headers = {"Content-Length": content_length}
+    handler.path = "/webhook"
+    handler.request_version = "HTTP/1.1"
+    handler.requestline = "POST /webhook HTTP/1.1"
+    handler.command = "POST"
+    handler.close_connection = True
+    server = SimpleNamespace(
+        config=WebhookConfig(secret="s3cret", path="/webhook"),
+        stats=WebhookStats(),
+        _stats_lock=threading.Lock(),
+    )
+    handler.server = server
+    handler.do_POST()
+    status_line = handler.wfile.getvalue().split(b"\r\n", 1)[0].decode()
+    status = int(status_line.split(" ", 2)[1])
+    return status, handler.rfile, server.stats
+
+
+class TestNegativeContentLength:
+    """Audit #29: a negative Content-Length is rejected before the body or HMAC."""
+
+    def test_negative_content_length_rejected_before_hmac(self):
+        body = b"x" * (11 * 1024 * 1024)
+        status, rfile, stats = _post_handler("-1", body)
+        assert status == 400
+        assert rfile.read_sizes == []
+        assert rfile.tell() == 0
+        assert stats.received == 0
+        assert stats.signature_failures == 0
+
+    def test_non_decimal_content_length_rejected_before_read(self):
+        status, rfile, stats = _post_handler("nope", b"abc")
+        assert status == 400
+        assert rfile.read_sizes == []
+        assert stats.signature_failures == 0
+
+    def test_oversized_content_length_still_rejected_unread(self):
+        status, rfile, stats = _post_handler(str(10 * 1024 * 1024 + 1), b"")
+        assert status == 413
+        assert rfile.read_sizes == []
+        assert stats.received == 0
 
 
 class TestCommitMonitorIntegration:

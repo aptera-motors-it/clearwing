@@ -761,6 +761,8 @@ class Preprocessor:
 
     @staticmethod
     def _is_git_url(s: str) -> bool:
+        if not s or s.startswith("-"):
+            return False
         return (
             s.startswith("http://")
             or s.startswith("https://")

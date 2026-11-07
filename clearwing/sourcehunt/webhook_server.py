@@ -154,8 +154,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._respond(404, "not found\n")
             return
 
-        # Read the body (cap at 10 MB — GitHub pushes shouldn't exceed this)
-        content_length = int(self.headers.get("Content-Length") or 0)
+        # Cap the body at 10 MB before HMAC. read(-1) would consume until EOF.
+        raw_length = self.headers.get("Content-Length") or "0"
+        try:
+            content_length = int(raw_length)
+        except ValueError:
+            self._respond(400, "invalid content-length\n")
+            return
+        if content_length < 0:
+            self._respond(400, "invalid content-length\n")
+            return
         if content_length > 10 * 1024 * 1024:
             self._respond(413, "payload too large\n")
             return
