@@ -101,6 +101,24 @@ def metasploit_run_command(session_id: int, command: str) -> dict:
     return {"success": True}
 
 
+@tool
+def crack_password(target: str, port: int, service: str, username: str) -> dict:
+    """Stand-in with the crack_password approval gate."""
+    if not interrupt(f"Approve password cracking for {username}@{target}:{port} ({service})?"):
+        return {"success": False, "error": "Password cracking denied by user"}
+    ran.append(f"crack {username}@{target}:{port}")
+    return {"success": True}
+
+
+@tool
+def enumerate_privesc(target: str, os_type: str) -> list:
+    """Stand-in with the enumerate_privesc approval gate."""
+    if not interrupt(f"Approve privilege escalation enumeration on {target} ({os_type})?"):
+        return []
+    ran.append(f"privesc {target} {os_type}")
+    return []
+
+
 def _scan_gate(name, action, target, details=""):
     suffix = f" ({details})" if details else ""
     if not interrupt(f"Approve {action} against target {target}{suffix}?"):
@@ -371,6 +389,8 @@ def _operator_handles(tool_calls, **config):
             exploit_vulnerability,
             metasploit_exploit,
             metasploit_run_command,
+            crack_password,
+            enumerate_privesc,
             gated_session_fixation,
             gated_scan_ports,
             gated_detect_services,
@@ -505,6 +525,14 @@ NOT_EXPLOITS = [
         "msfconsole -x 'use exploit/multi/handler'",
     ),
     (_call("metasploit_run_command", "m1", session_id=1, command="id"), "msf id"),
+    (
+        _call("crack_password", "c1", target="10.0.0.5", port=22, service="ssh", username="root"),
+        "crack root@10.0.0.5:22",
+    ),
+    (
+        _call("enumerate_privesc", "p1", target="10.0.0.5", os_type="linux"),
+        "privesc 10.0.0.5 linux",
+    ),
     (_call("scan_ports", "s1", target="10.0.0.5"), "scan_ports 10.0.0.5"),
 ]
 
