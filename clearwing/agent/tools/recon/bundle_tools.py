@@ -7,6 +7,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import urlparse
 
 from clearwing.agent.tooling import interrupt, tool
 
@@ -53,18 +54,18 @@ def _fetch_url(url: str, timeout: int = 30) -> tuple[int, str, float]:
 def _extract_script_urls(html: str, base_url: str) -> list[str]:
     """Extract script src URLs from HTML."""
     urls: list[str] = []
+    base_host = urlparse(base_url).netloc
     for match in re.finditer(r'<script[^>]+src\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE):
         src = match.group(1)
         if src.startswith("//"):
             src = "https:" + src
         elif src.startswith("/"):
-            from urllib.parse import urlparse
-
             parsed = urlparse(base_url)
             src = f"{parsed.scheme}://{parsed.netloc}{src}"
         elif not src.startswith("http"):
             src = base_url.rstrip("/") + "/" + src
-        urls.append(src)
+        if urlparse(src).netloc == base_host:
+            urls.append(src)
     return urls
 
 

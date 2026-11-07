@@ -29,7 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from clearwing.agent.tooling import tool
+from clearwing.agent.tooling import interrupt, tool
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +319,8 @@ def screenshot_surface(urls: list[str], out_dir: str = "/tmp/asm-screenshots") -
     from clearwing.agent.tools.recon.browser_tools import browser_navigate, browser_screenshot
 
     out = Path(out_dir)
+    if not interrupt(f"About to write screenshots and gallery to {out.expanduser().resolve()}"):
+        return {"error": "User declined screenshot output."}
     out.mkdir(parents=True, exist_ok=True)
     shots: list[dict] = []
     for index, url in enumerate(urls):
