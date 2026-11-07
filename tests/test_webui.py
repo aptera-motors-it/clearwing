@@ -6,8 +6,10 @@ import pytest
 
 # Import guard - tests skip if fastapi not installed
 fastapi = pytest.importorskip("fastapi")
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from clearwing.core.events import EventBus
 from clearwing.ui.web.app import _cors_origins, create_app
 
 API_KEY = "test-key-8f3a"
@@ -49,7 +51,7 @@ class TestSessionEndpoints:
     def test_list_sessions_empty(self, client):
         with patch("clearwing.data.memory.SessionStore") as mock_store:
             mock_store.return_value.list_sessions.return_value = []
-            resp = client.get("/api/sessions")
+            resp = client.get("/api/sessions", headers=AUTH)
             assert resp.status_code == 200
             assert resp.json() == []
 
@@ -65,7 +67,7 @@ class TestSessionEndpoints:
 
         with patch("clearwing.data.memory.SessionStore") as mock_store:
             mock_store.return_value.list_sessions.return_value = [mock_session]
-            resp = client.get("/api/sessions")
+            resp = client.get("/api/sessions", headers=AUTH)
             assert resp.status_code == 200
             data = resp.json()
             assert len(data) == 1
@@ -89,7 +91,7 @@ class TestSessionEndpoints:
 
         with patch("clearwing.data.memory.SessionStore") as mock_store:
             mock_store.return_value.load.return_value = mock_session
-            resp = client.get("/api/sessions/abc123")
+            resp = client.get("/api/sessions/abc123", headers=AUTH)
             assert resp.status_code == 200
             data = resp.json()
             assert data["session_id"] == "abc123"
@@ -98,7 +100,7 @@ class TestSessionEndpoints:
     def test_get_session_not_found(self, client):
         with patch("clearwing.data.memory.SessionStore") as mock_store:
             mock_store.return_value.load.return_value = None
-            resp = client.get("/api/sessions/nonexistent")
+            resp = client.get("/api/sessions/nonexistent", headers=AUTH)
             assert resp.status_code == 404
 
 
@@ -111,13 +113,13 @@ class TestMetricsEndpoints:
             mock_summary.total_cost_usd = 0.05
             mock_summary.tool_calls = 10
             mock_tracker.return_value.get_summary.return_value = mock_summary
-            resp = client.get("/api/metrics")
+            resp = client.get("/api/metrics", headers=AUTH)
             assert resp.status_code == 200
             data = resp.json()
             assert data["input_tokens"] == 1000
 
     def test_prometheus_metrics(self, client):
-        resp = client.get("/api/metrics/prometheus")
+        resp = client.get("/api/metrics/prometheus", headers=AUTH)
         assert resp.status_code == 200
 
 
@@ -270,3 +272,105 @@ class TestCorsOrigins:
             "CLEARWING_WEB_CORS_ORIGINS", "https://a.example, https://b.example "
         )
         assert _cors_origins() == ["https://a.example", "https://b.example"]
+
+
+PUBLIC_ROUTES = {"/", "/api/health"}
+
+SENSITIVE_ROUTES = [
+    ("GET", "/api/sessions"),
+    ("GET", "/api/sessions/abc123"),
+    ("GET", "/api/metrics"),
+    ("GET", "/api/metrics/prometheus"),
+    ("GET", "/api/disclosure/queue"),
+    ("GET", "/api/disclosure/status"),
+    ("POST", "/api/disclosure/f1/validate"),
+    ("POST", "/api/disclosure/f1/reject"),
+    ("POST", "/api/disclosure/f1/send"),
+    ("GET", "/api/asm/scopes"),
+    ("GET", "/api/asm/scopes/example.com/assets"),
+]
+
+
+class TestSensitiveRoutesRequireKey:
+    """Every route except /api/health and the static shell needs X-API-Key."""
+
+    @pytest.mark.parametrize(("method", "path"), SENSITIVE_ROUTES)
+    def test_missing_key_is_401(self, client, method, path):
+        resp = client.request(method, path, json={} if method == "POST" else None)
+        assert resp.status_code == 401
+
+    @pytest.mark.parametrize(("method", "path"), SENSITIVE_ROUTES)
+    def test_wrong_key_is_401(self, client, method, path):
+        resp = client.request(
+            method,
+            path,
+            json={} if method == "POST" else None,
+            headers={"X-API-Key": "wrong"},
+        )
+        assert resp.status_code == 401
+
+    def test_every_api_route_declares_the_key_dependency(self, app):
+        for route in app.routes:
+            if not isinstance(route, APIRoute) or route.path in PUBLIC_ROUTES:
+                continue
+            guards = [d.call.__name__ for d in route.dependant.dependencies]
+            assert "require_api_key" in guards, route.path
+
+    def test_valid_key_reaches_disclosure_queue(self, client):
+        with patch("clearwing.sourcehunt.disclosure_db.DisclosureDB") as mock_db:
+            mock_db.return_value.get_queue.return_value = [{"finding_id": "f1"}]
+            resp = client.get("/api/disclosure/queue", headers=AUTH)
+        assert resp.status_code == 200
+        assert resp.json() == [{"finding_id": "f1"}]
+
+    @pytest.mark.parametrize(("method", "path"), SENSITIVE_ROUTES[:4])
+    def test_no_key_configured_denies_session_and_metrics_routes(self, unauth_client, method, path):
+        assert unauth_client.request(method, path).status_code == 503
+
+
+class _EmittingGraph:
+    """Stand-in agent graph that emits session-private events on the shared bus."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    async def astream(self, input_msg, config, stream_mode=None):
+        bus = EventBus()
+        bus.emit_tool("scan_ports", "result", {"owner": self.label})
+        bus.emit_flag(f"FLAG{{{self.label}}}", f"session-{self.label}")
+        return
+        yield
+
+
+class TestWebSocketEventScoping:
+    def _start(self, ws):
+        ws.send_json({"type": "start", "target": "10.0.0.1"})
+        return ws.receive_json()["session_id"]
+
+    def _drain_until_flag(self, ws, label):
+        seen = []
+        while True:
+            msg = ws.receive_json()
+            seen.append(msg)
+            if msg["type"] == "flag_found" and label in str(msg["data"]):
+                return seen
+
+    def test_events_do_not_cross_sessions(self, client):
+        graphs = iter([_EmittingGraph("A"), _EmittingGraph("B")])
+        with patch("clearwing.ui.web.app.create_agent", side_effect=lambda **_: next(graphs)):
+            with (
+                client.websocket_connect("/ws/agent", headers=AUTH) as ws_a,
+                client.websocket_connect("/ws/agent", headers=AUTH) as ws_b,
+            ):
+                self._start(ws_a)
+                self._start(ws_b)
+
+                ws_a.send_json({"type": "message", "content": "go"})
+                seen_a = self._drain_until_flag(ws_a, "A")
+
+                ws_b.send_json({"type": "message", "content": "go"})
+                seen_b = self._drain_until_flag(ws_b, "B")
+
+        assert "'owner': 'A'" in str(seen_a)
+        assert "FLAG{A}" not in str(seen_b)
+        assert "'owner': 'A'" not in str(seen_b)

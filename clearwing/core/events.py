@@ -6,6 +6,7 @@ import enum
 import logging
 import threading
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _bus_logger = logging.getLogger("clearwing.events")
+
+current_session_id: ContextVar[str | None] = ContextVar("clearwing_session_id", default=None)
 
 _MSG_TYPE_TO_LEVEL = {
     "debug": logging.DEBUG,
@@ -119,8 +122,13 @@ class EventBus:
 
         Each handler is called with *data* as its sole argument.  If a handler
         raises an exception, the error is logged and the remaining handlers
-        continue to execute.
+        continue to execute.  Dict payloads emitted inside a session
+        (see :data:`current_session_id`) are stamped with its ``session_id`` so
+        consumers can scope session-private events.
         """
+        session_id = current_session_id.get()
+        if session_id is not None and isinstance(data, dict) and "session_id" not in data:
+            data = {**data, "session_id": session_id}
         with self._lock:
             handlers = list(self._handlers[event_type])
 

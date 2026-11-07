@@ -19,11 +19,23 @@ import clearwing.observability.telemetry as telemetry
 from clearwing.agent.graph import create_agent
 from clearwing.agent.operator import OperatorAgent, OperatorConfig
 from clearwing.agent.runtime import Command
-from clearwing.core.events import EventBus, EventType
+from clearwing.core.events import EventBus, EventType, current_session_id
 from clearwing.observability import MetricsCollector
 from clearwing.observability.integration import ObservabilityIntegration
 
 logger = logging.getLogger(__name__)
+
+_SESSION_PRIVATE_EVENTS = frozenset(
+    {
+        EventType.MESSAGE,
+        EventType.TOOL_START,
+        EventType.TOOL_RESULT,
+        EventType.FLAG_FOUND,
+        EventType.COST_UPDATE,
+        EventType.ERROR,
+        EventType.APPROVAL_NEEDED,
+    }
+)
 
 
 def _make_session_store():
@@ -102,7 +114,7 @@ def create_app():
     async def health():
         return {"status": "ok", "service": "clearwing"}
 
-    @app.get("/api/sessions")
+    @app.get("/api/sessions", dependencies=[Depends(require_api_key)])
     async def list_sessions():
         """List all known sessions."""
         store = _make_session_store()
@@ -120,7 +132,7 @@ def create_app():
             for s in sessions
         ]
 
-    @app.get("/api/sessions/{session_id}")
+    @app.get("/api/sessions/{session_id}", dependencies=[Depends(require_api_key)])
     async def get_session(session_id: str):
         """Get details for a specific session."""
         store = _make_session_store()
@@ -145,7 +157,7 @@ def create_app():
             "flags_found": session.flags_found,
         }
 
-    @app.get("/api/metrics")
+    @app.get("/api/metrics", dependencies=[Depends(require_api_key)])
     async def get_metrics():
         """Get current metrics in JSON format."""
         tracker = _make_cost_tracker()
@@ -157,7 +169,7 @@ def create_app():
             "tool_calls": summary.tool_calls,
         }
 
-    @app.get("/api/metrics/prometheus")
+    @app.get("/api/metrics/prometheus", dependencies=[Depends(require_api_key)])
     async def get_prometheus_metrics():
         """Get metrics in Prometheus exposition format."""
         collector = MetricsCollector()
@@ -268,7 +280,7 @@ def create_app():
     # Disclosure REST endpoints
     # ---------------------------------------------------------------
 
-    @app.get("/api/disclosure/queue")
+    @app.get("/api/disclosure/queue", dependencies=[Depends(require_api_key)])
     async def disclosure_queue(state: str | None = None, repo: str | None = None):
         from clearwing.sourcehunt.disclosure_db import DisclosureDB
 
@@ -278,7 +290,7 @@ def create_app():
         finally:
             db.close()
 
-    @app.post("/api/disclosure/{finding_id}/validate")
+    @app.post("/api/disclosure/{finding_id}/validate", dependencies=[Depends(require_api_key)])
     async def disclosure_validate(finding_id: str, body: dict):
         from clearwing.sourcehunt.disclosure_db import DisclosureDB
         from clearwing.sourcehunt.disclosure_workflow import DisclosureWorkflow
@@ -293,7 +305,7 @@ def create_app():
         finally:
             db.close()
 
-    @app.post("/api/disclosure/{finding_id}/reject")
+    @app.post("/api/disclosure/{finding_id}/reject", dependencies=[Depends(require_api_key)])
     async def disclosure_reject(finding_id: str, body: dict):
         from clearwing.sourcehunt.disclosure_db import DisclosureDB
         from clearwing.sourcehunt.disclosure_workflow import DisclosureWorkflow
@@ -308,7 +320,7 @@ def create_app():
         finally:
             db.close()
 
-    @app.post("/api/disclosure/{finding_id}/send")
+    @app.post("/api/disclosure/{finding_id}/send", dependencies=[Depends(require_api_key)])
     async def disclosure_send(finding_id: str, body: dict):
         from clearwing.sourcehunt.disclosure_db import DisclosureDB
         from clearwing.sourcehunt.disclosure_workflow import DisclosureWorkflow
@@ -327,7 +339,7 @@ def create_app():
         finally:
             db.close()
 
-    @app.get("/api/disclosure/status")
+    @app.get("/api/disclosure/status", dependencies=[Depends(require_api_key)])
     async def disclosure_status():
         from clearwing.sourcehunt.disclosure_db import DisclosureDB
         from clearwing.sourcehunt.disclosure_workflow import DisclosureWorkflow
@@ -339,7 +351,7 @@ def create_app():
         finally:
             db.close()
 
-    @app.get("/api/asm/scopes")
+    @app.get("/api/asm/scopes", dependencies=[Depends(require_api_key)])
     async def asm_scopes():
         """List ASM scopes with an asset count each."""
         from clearwing.asm.assets import AssetStore
@@ -357,7 +369,7 @@ def create_app():
         finally:
             store.close()
 
-    @app.get("/api/asm/scopes/{scope}/assets")
+    @app.get("/api/asm/scopes/{scope}/assets", dependencies=[Depends(require_api_key)])
     async def asm_assets(scope: str, asset_type: str | None = None):
         """List the assets in a scope (optionally filtered by type)."""
         from clearwing.asm.assets import AssetStore
@@ -407,8 +419,14 @@ def create_app():
         try:
             bus = EventBus()
 
-            def on_event(event_type_name: str):
+            def on_event(event_type_name: str, private: bool):
                 def handler(data):
+                    if private and not (
+                        session_id is not None
+                        and isinstance(data, dict)
+                        and data.get("session_id") == session_id
+                    ):
+                        return
                     try:
                         if isinstance(data, dict | list | str | int | float | bool | type(None)):
                             serializable = data
@@ -443,7 +461,7 @@ def create_app():
                 EventType.ASSET_DISCOVERED: "asset_discovered",
             }
             for et, name in event_map.items():
-                h = on_event(name)
+                h = on_event(name, et in _SESSION_PRIVATE_EVENTS)
                 handlers[et] = h
                 bus.subscribe(et, h)
 
@@ -453,6 +471,7 @@ def create_app():
 
         graph = None
         config = None
+        session_id = None
 
         try:
             while True:
@@ -480,6 +499,7 @@ def create_app():
                     model = data.get("model", "claude-sonnet-4-6")
                     target = data.get("target", "")
                     session_id = uuid.uuid4().hex[:8]
+                    current_session_id.set(session_id)
 
                     graph = create_agent(
                         model_name=model,
