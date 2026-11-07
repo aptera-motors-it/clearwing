@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 import clearwing.agent.tools.crypto.timing_tools as timing_mod
+from clearwing.agent.tooling import InterruptRequest
 from clearwing.agent.tools.crypto.timing_tools import (
     get_timing_tools,
     timing_bitwise_probe,
@@ -205,6 +206,30 @@ class TestTimingProbeValidation:
             result = timing_probe.invoke({"target": "http://example.com", "samples": 10})
         assert "error" in result
         assert "declined" in result["error"].lower()
+
+    def test_approval_prompt_discloses_request_metadata(self):
+        body = '{"confirm":true}'
+        with pytest.raises(InterruptRequest) as raised:
+            timing_probe.invoke({
+                "target": "https://victim.example",
+                "method": "DELETE",
+                "path": "/admin/users/1",
+                "headers": {
+                    "Authorization": "Bearer secret",
+                    "X-Request-ID": "request-1",
+                },
+                "body": body,
+                "samples": 5,
+                "warmup": 0,
+            })
+
+        prompt = raised.value.prompt
+        assert "DELETE" in prompt
+        assert "https://victim.example/admin/users/1" in prompt
+        assert "Authorization" in prompt
+        assert "X-Request-ID" in prompt
+        assert f"body_len={len(body)}" in prompt
+        assert body not in prompt
 
 
 class TestTimingProbeWithMock:

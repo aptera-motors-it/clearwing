@@ -1,12 +1,61 @@
+import ipaddress
+from urllib.parse import urlparse
+
 import clearwing.scanning as scanning
 from clearwing.agent.tooling import _TOOL_ACTIVE, interrupt, tool
+from clearwing.asm.scope import Scope
+from clearwing.core.config import Config
 
 
-def _scan_approved(action: str, target: str, details: str = "") -> bool:
-    if not _TOOL_ACTIVE.get():
+def _configured_engagement_scopes() -> list[Scope]:
+    asm_config = Config().get("asm", default={}) or {}
+    return [
+        Scope.from_config(name, asm_config)
+        for name in (asm_config.get("scopes") or {})
+    ]
+
+
+def _target_host(target: str) -> str:
+    candidate = target.strip()
+    if "://" in candidate:
+        return (urlparse(candidate).hostname or "").lower().rstrip(".")
+    return candidate.lower().rstrip(".")
+
+
+def _target_in_scope(target: str, scope: Scope) -> bool:
+    host = _target_host(target)
+    if not host:
+        return False
+    if any(host == excluded or host.endswith("." + excluded) for excluded in scope.exclusions):
+        return False
+    if scope.in_scope(host):
         return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None:
+        for cidr in scope.cidrs:
+            try:
+                if address in ipaddress.ip_network(cidr, strict=False):
+                    return True
+            except ValueError:
+                continue
+    seed_hosts = {
+        (urlparse(seed).hostname or "").lower().rstrip(".")
+        for seed in scope.seed_urls
+    }
+    return host in seed_hosts
+
+
+def _require_scan_access(action: str, target: str, details: str = "") -> None:
+    if not _TOOL_ACTIVE.get():
+        return
+    if not any(_target_in_scope(target, scope) for scope in _configured_engagement_scopes()):
+        raise PermissionError(f"Target {target} is outside configured engagement scope")
     suffix = f" ({details})" if details else ""
-    return interrupt(f"Approve {action} against target {target}{suffix}?")
+    if not interrupt(f"Approve {action} against target {target}{suffix}?"):
+        raise PermissionError(f"User declined {action} against {target}")
 
 
 @tool
@@ -28,8 +77,7 @@ async def scan_ports(
         List of open port info dicts with keys: port, protocol, state, service.
     """
     port_scope = f"ports={ports or 'common'}, type={scan_type}, threads={threads}"
-    if not _scan_approved("port scan", target, port_scope):
-        return [{"error": f"User declined port scan against {target}"}]
+    _require_scan_access("port scan", target, port_scope)
 
     scanner = scanning.PortScanner()
     return await scanner.scan(target, ports or [], scan_type, threads)
@@ -47,8 +95,7 @@ async def detect_services(target: str, open_ports: list[dict]) -> list[dict]:
         List of service info dicts with keys: port, service, banner, version, protocol.
     """
     ports = [item.get("port") for item in open_ports]
-    if not _scan_approved("service detection", target, f"ports={ports}"):
-        return [{"error": f"User declined service detection against {target}"}]
+    _require_scan_access("service detection", target, f"ports={ports}")
 
     scanner = scanning.ServiceScanner()
     return await scanner.detect(target, open_ports)
@@ -73,8 +120,7 @@ async def scan_vulnerabilities(target: str, services: list[dict]) -> list[dict]:
         }
         for item in services
     ]
-    if not _scan_approved("vulnerability scan", target, f"services={service_scope}"):
-        return [{"error": f"User declined vulnerability scan against {target}"}]
+    _require_scan_access("vulnerability scan", target, f"services={service_scope}")
 
     scanner = scanning.VulnerabilityScanner()
     try:
@@ -93,8 +139,7 @@ async def detect_os(target: str) -> str:
     Returns:
         Detected OS string (e.g. 'Linux/Unix', 'Windows') or 'Unknown'.
     """
-    if not _scan_approved("OS detection", target):
-        return f"User declined OS detection against {target}"
+    _require_scan_access("OS detection", target)
 
     scanner = scanning.OSScanner()
     return await scanner.detect(target)
