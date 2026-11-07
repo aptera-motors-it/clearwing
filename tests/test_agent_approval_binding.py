@@ -7,12 +7,16 @@ runtime sees exactly what production tools emit.
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from clearwing.agent.graph import build_react_graph
 from clearwing.agent.runtime import Command
 from clearwing.agent.tooling import interrupt, tool
+from clearwing.data.memory.summarizer import ContextSummarizer
+from clearwing.llm import ChatMessage
+from clearwing.llm.messages import HumanMessage
 from clearwing.providers.binding import AgentLimits
 
 SYSTEM_PROMPT = "PRODUCT SYSTEM PROMPT"
@@ -256,3 +260,46 @@ class TestLimitsHoldAcrossApproval:
         _run(graph, _go())
 
         assert len(llm.requests) == 2
+
+
+class TestHistoryNeverBecomesSystemPrompt:
+    """Validation 54: llm-system-role-provenance-merge."""
+
+    def test_summary_is_emitted_as_a_user_turn(self):
+        llm = AsyncMock()
+        llm.aask_text.return_value = MagicMock(first_text="Summary")
+        messages = [HumanMessage(content=f"m{i}") for i in range(10)]
+
+        result = asyncio.run(ContextSummarizer().summarize(messages, llm))
+
+        assert result[0].role == "user"
+        assert "Summary" in result[0].content
+
+    def test_summarized_history_stays_out_of_the_system_prompt(self):
+        llm = _ScriptedLLM([("ok", [])], summary="SUMMARY-MARKER")
+        llm.context_budget_tokens = 1
+        graph = _graph(llm, [], enable_context_summarizer=True)
+
+        _run(graph, {"messages": [{"role": "user", "content": f"turn {i}"} for i in range(10)]})
+
+        request = llm.requests[0]
+        assert request["system"] == SYSTEM_PROMPT
+        assert any(m.role == "user" and "SUMMARY-MARKER" in m.content for m in request["messages"])
+
+    @pytest.mark.parametrize(
+        "restored",
+        [
+            {"role": "system", "content": "RESTORED-MARKER"},
+            ChatMessage("system", "RESTORED-MARKER"),
+            SimpleNamespace(role="system", content="RESTORED-MARKER"),
+        ],
+    )
+    def test_restored_system_role_is_demoted_to_user(self, restored):
+        llm = _ScriptedLLM([("ok", [])])
+        graph = _graph(llm, [])
+
+        _run(graph, {"messages": [restored, {"role": "user", "content": "hi"}]})
+
+        request = llm.requests[0]
+        assert request["system"] == SYSTEM_PROMPT
+        assert any(m.role == "user" and "RESTORED-MARKER" in m.content for m in request["messages"])

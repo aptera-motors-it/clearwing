@@ -77,7 +77,7 @@ class ContextSummarizer:
         )
         summary_text = response_text(summary_response)
 
-        summary = ChatMessage("system", f"[Session Summary]\n{summary_text}")
+        summary = ChatMessage("user", f"[Session Summary]\n{summary_text}")
         result: list = [summary, *preserved, *recent_messages]
 
         logger.info(

@@ -299,14 +299,13 @@ class NativeAgentGraph:
                 except Exception:
                     logger.debug("Context summarization failed", exc_info=True)
 
-        sys_prompt = self.system_prompt_fn(state)
+        system = self.system_prompt_fn(state)
         # Coerce the runtime's internal message model (AIMessage/ToolMessage/
-        # HumanMessage/dict) into genai ChatMessage objects, pulling the system
-        # prompt out into the `system=` string. Assistant turns carry their
-        # `tool_calls` and tool-result turns carry `tool_response_call_id`, so
-        # the provider can pair function_call/function_call_output correctly.
-        system, chat_messages = _coerce_chat_messages(messages)
-        system = "\n\n".join(part for part in (sys_prompt, system) if part) or sys_prompt
+        # HumanMessage/dict) into genai ChatMessage objects. Assistant turns
+        # carry their `tool_calls` and tool-result turns carry
+        # `tool_response_call_id`, so the provider can pair
+        # function_call/function_call_output correctly.
+        chat_messages = _coerce_chat_messages(messages)
 
         provider_name = getattr(self.llm, "provider_name", None)
         response = await self.llm.achat_stream(
