@@ -118,7 +118,7 @@
 
     <script>
         // Data injected here by Python
-        const graphData = {{ graph_data | safe }};
+        const graphData = {{ graph_data | tojson }};
 
         const width = window.innerWidth;
         const height = window.innerHeight;
@@ -213,21 +213,29 @@
         function showTooltip(event, d) {
             const tooltip = d3.select("#tooltip");
             tooltip.transition().duration(200).style("opacity", 0.9);
-            
-            let propertiesHtml = "";
+
+            tooltip.selectAll("*").remove();
+            tooltip.append("h3").text(String(d.entity_type || "unknown").toUpperCase());
+
+            const idLine = tooltip.append("p");
+            idLine.append("strong").text("ID:");
+            idLine.append("span").text(` ${d.id}`);
+
             if (d.properties) {
                 for (const [key, value] of Object.entries(d.properties)) {
-                    propertiesHtml += `<strong>${key}:</strong> ${value}<br/>`;
+                    const propertyLine = tooltip.append("p");
+                    propertyLine.append("strong").text(`${key}:`);
+                    propertyLine.append("span").text(` ${value}`);
                 }
             }
 
-            tooltip.html(`
-                <h3>${d.entity_type.toUpperCase()}</h3>
-                <p><strong>ID:</strong> ${d.id}</p>
-                <p>${propertiesHtml}</p>
-                <p style="font-size: 10px; margin-top: 5px; color: #666;">Created: ${d.created_at || 'N/A'}</p>
-            `)
-            .style("left", (event.pageX + 10) + "px")
+            tooltip.append("p")
+                .style("font-size", "10px")
+                .style("margin-top", "5px")
+                .style("color", "#666")
+                .text(`Created: ${d.created_at || 'N/A'}`);
+
+            tooltip.style("left", (event.pageX + 10) + "px")
             .style("top", (event.pageY - 28) + "px");
         }
 

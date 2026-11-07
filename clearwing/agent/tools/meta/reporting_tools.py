@@ -1,4 +1,7 @@
-from clearwing.agent.tooling import tool
+from pathlib import Path
+
+from clearwing.agent.tooling import interrupt, tool
+from clearwing.core.config import default_results_dir
 from clearwing.core.engine import ScanResult
 from clearwing.data.database import Database
 from clearwing.reporting import ReportGenerator
@@ -40,6 +43,18 @@ def save_report(filepath: str, format: str, scan_data: dict) -> str:
     Returns:
         Confirmation message with file path.
     """
+    reports_dir = Path(default_results_dir("reports")).expanduser().resolve()
+    requested_path = Path(filepath).expanduser()
+    destination = (
+        requested_path.resolve()
+        if requested_path.is_absolute()
+        else (reports_dir / requested_path).resolve()
+    )
+    if destination != reports_dir and reports_dir not in destination.parents:
+        return f"Refusing path outside reports directory: {reports_dir}"
+    if not interrupt(f"Approve saving {format} report to {destination}?"):
+        return "Report save rejected by user."
+
     result = ScanResult(target=scan_data.get("target", "unknown"))
     result.open_ports = scan_data.get("open_ports", [])
     result.services = scan_data.get("services", [])
@@ -48,8 +63,8 @@ def save_report(filepath: str, format: str, scan_data: dict) -> str:
     result.os_info = scan_data.get("os_info")
 
     generator = ReportGenerator()
-    generator.save(result, filepath, format)
-    return f"Report saved to {filepath}"
+    generator.save(result, str(destination), format)
+    return f"Report saved to {destination}"
 
 
 @tool

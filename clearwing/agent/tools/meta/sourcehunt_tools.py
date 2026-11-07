@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
-from clearwing.agent.tooling import tool
+from clearwing.agent.tooling import interrupt, tool
+from clearwing.core.config import default_results_dir
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +28,7 @@ def hunt_source_code(
     repo_url_or_path: str,
     branch: str = "main",
     depth: str | None = None,
-    budget_usd: float = 0.0,
+    budget_usd: float = 5.0,
     output_dir: str | None = None,
     target_files: list[str] | None = None,
     target_window_lines: int = 480,
@@ -44,7 +46,7 @@ def hunt_source_code(
                'standard' (LLM hunters on rank A/B + verifier),
                'deep' (everything + Tier C propagation audit + exploit triage).
                Defaults to 'standard' with target_files, otherwise 'quick'.
-        budget_usd: Max dollars to spend. Defaults to unlimited; 0 means unlimited.
+        budget_usd: Max dollars to spend. Must be greater than zero.
         output_dir: Where to write the SARIF / markdown / JSON outputs.
         target_files: Optional repository-relative files to hunt directly,
                       bypassing the ranker.
@@ -54,6 +56,19 @@ def hunt_source_code(
         A human-readable summary with the top findings. Full reports are
         written to {output_dir}/{session_id}/.
     """
+    resolved_depth = depth or ("standard" if target_files else "quick")
+    if budget_usd <= 0:
+        return "Refusing unlimited budget; pass budget_usd greater than zero."
+
+    resolved_output_dir = str(
+        Path(output_dir or default_results_dir("sourcehunt")).expanduser().resolve()
+    )
+    if resolved_depth != "quick" and not interrupt(
+        f"Approve source hunt of {repo_url_or_path} at depth={resolved_depth} "
+        f"with budget_usd={budget_usd} and output_dir={resolved_output_dir}?"
+    ):
+        return "Source hunt rejected by user."
+
     try:
         from clearwing.providers import ProviderManager, resolve_llm_endpoint
         from clearwing.sourcehunt.runner import SourceHuntRunner
@@ -72,9 +87,9 @@ def hunt_source_code(
             repo_url=repo_url_or_path,
             branch=branch,
             local_path=local_path,
-            depth=depth or ("standard" if target_files else "quick"),
+            depth=resolved_depth,
             budget_usd=budget_usd,
-            output_dir=output_dir,
+            output_dir=resolved_output_dir,
             target_files=target_files,
             target_window_lines=target_window_lines,
             provider_manager=provider_manager,
