@@ -303,6 +303,8 @@ class TestDenylist:
         assert _denied_tools() == {
             "create_custom_tool",
             "connect_mcp_server",
+            "kali_setup",
+            "kali_install_tool",
             "kali_cleanup",
         }
 
@@ -313,12 +315,16 @@ class TestDenylist:
                 "validate_target",
                 "create_custom_tool",
                 "connect_mcp_server",
+                "kali_setup",
+                "kali_install_tool",
                 "kali_cleanup",
             ]
         )
         assert "validate_target" in server._tools
         assert "create_custom_tool" not in server._tools
         assert "connect_mcp_server" not in server._tools
+        assert "kali_setup" not in server._tools
+        assert "kali_install_tool" not in server._tools
         assert "kali_cleanup" not in server._tools
 
     def test_denied_tool_not_in_tools_list(self, monkeypatch):
@@ -328,15 +334,15 @@ class TestDenylist:
         names = {t["name"] for t in response["result"]["tools"]}
         assert "create_custom_tool" not in names
 
-    def test_denied_tool_call_rejected(self, monkeypatch):
+    def test_denied_kali_tool_call_rejected(self, monkeypatch):
         monkeypatch.delenv("CLEARWING_MCP_DENIED_TOOLS", raising=False)
-        server = self._build_real(["create_custom_tool"])
+        server = self._build_real(["kali_setup"])
         response = server.handle_request(
             {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
-                "params": {"name": "create_custom_tool", "arguments": {}},
+                "params": {"name": "kali_setup", "arguments": {}},
             }
         )
         assert "error" in response

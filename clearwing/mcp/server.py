@@ -5,7 +5,9 @@ import os
 import sys
 from typing import Any
 
-_DEFAULT_DENIED_TOOLS = "create_custom_tool,connect_mcp_server,kali_cleanup"
+_DEFAULT_DENIED_TOOLS = (
+    "create_custom_tool,connect_mcp_server,kali_setup,kali_install_tool,kali_cleanup"
+)
 
 
 def _denied_tools() -> set[str]:
@@ -51,9 +53,9 @@ class MCPServer:
         """Register all Clearwing tools as MCP-compatible tool definitions.
 
         Tools whose names appear in ``CLEARWING_MCP_DENIED_TOOLS`` (default:
-        ``create_custom_tool,connect_mcp_server,kali_cleanup``) are skipped so
-        the MCP surface cannot be used to spawn processes, register runtime
-        code, or tear down the isolation container.
+        ``create_custom_tool,connect_mcp_server,kali_setup,kali_install_tool,
+        kali_cleanup``) are skipped so the MCP surface cannot be used to spawn
+        processes, register runtime code, or manipulate the isolation container.
         """
         from clearwing.agent.tools import get_all_tools
 
