@@ -34,6 +34,11 @@ _AUTO_APPROVED_SCAN_TOOLS = frozenset(
     }
 )
 
+# Tools that launch an exploit. Other exploitation-phase tools
+# (metasploit_run_command, crack_password, enumerate_privesc) run arbitrary
+# commands or credential attacks, so they always ask.
+_AUTO_APPROVED_EXPLOIT_TOOLS = frozenset({"exploit_vulnerability", "metasploit_exploit"})
+
 # nmap discovery options only: no NSE scripts (-sC, -A, --script), no file
 # input/output (-i*, -o*), no data/script directories.
 _NMAP_DISCOVERY_OPTION = re.compile(
@@ -85,7 +90,7 @@ class OperatorConfig:
     timeout_minutes: int = 60
     cost_limit: float = 0.0  # 0 = no limit
     auto_approve_scans: bool = False  # opt in to approving scan tools without asking
-    auto_approve_exploits: bool = False  # require user for exploit approval
+    auto_approve_exploits: bool = False  # opt in to approving exploit tools without asking
     lhost: str = "host.docker.internal"  # callback address reachable from target
     lport: int = 9999  # preferred callback-listener port
 
@@ -271,7 +276,8 @@ class OperatorAgent:
                             "escalated",
                             escalation_question="Approval required for a gated action — "
                             "please review it and re-run with auto_approve_scans=True "
-                            "for scan tools, or auto_approve_exploits=True if authorized.",
+                            "for scan tools, or auto_approve_exploits=True for exploit "
+                            "tools if authorized.",
                         )
                     continue
 
@@ -405,7 +411,10 @@ class OperatorAgent:
                     self._progress.append(f"Auto-approved scan: {prompt[:100]}")
                     return await self._ahandle_interrupt(graph.get_state(config), graph, config)
 
-                if self.config.auto_approve_exploits:
+                if (
+                    self.config.auto_approve_exploits
+                    and intr.tool_name in _AUTO_APPROVED_EXPLOIT_TOOLS
+                ):
                     await graph.ainvoke(Command(resume=True), config)
                     self._progress.append(f"Auto-approved exploit: {prompt[:100]}")
                     return await self._ahandle_interrupt(graph.get_state(config), graph, config)

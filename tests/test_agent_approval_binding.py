@@ -1,9 +1,9 @@
 """Approval binding, guardrail enforcement, loop limits, and message roles in the agent runtime.
 
 The gated tools below are stand-ins that keep the real tool names and the real
-``interrupt()`` prompt templates (kali_docker_tool.py, exploit_tools.py, and the
-scanner_tools.py scan gates) so the runtime and operator see exactly what
-production tools emit.
+``interrupt()`` prompt templates (kali_docker_tool.py, exploit_tools.py,
+session_tools.py, and the scanner_tools.py scan gates) so the runtime and
+operator see exactly what production tools emit.
 """
 
 import asyncio
@@ -72,6 +72,24 @@ def exploit_vulnerability(target: str, vulnerability: dict) -> dict:
         return {"success": False, "error": "Exploit denied by user"}
     ran.append(f"exploit {target}")
     return {"success": True}
+
+
+@tool
+def metasploit_exploit(target: str, exploit_module: str) -> dict:
+    """Stand-in with the metasploit_exploit approval gate."""
+    if not interrupt(f"Approve Metasploit exploit {exploit_module} on {target}?"):
+        return {"success": False, "error": "Metasploit exploit denied by user"}
+    ran.append(f"msf exploit {exploit_module} {target}")
+    return {"success": True}
+
+
+@tool(name="test_session_fixation")
+def gated_session_fixation(target: str) -> dict:
+    """Stand-in with the session_tools.py session fixation gate (sends a login attempt)."""
+    if not interrupt(f"About to test session fixation on {target}"):
+        return {"error": "User declined session fixation test."}
+    ran.append(f"session fixation {target}")
+    return {}
 
 
 @tool
@@ -351,7 +369,9 @@ def _operator_handles(tool_calls, **config):
         [
             kali_execute,
             exploit_vulnerability,
+            metasploit_exploit,
             metasploit_run_command,
+            gated_session_fixation,
             gated_scan_ports,
             gated_detect_services,
             gated_scan_vulnerabilities,
@@ -460,6 +480,80 @@ class TestOperatorAutoApprovesOnlyScans:
         assert _operator_handles(calls, on_escalate=lambda q: next(answers)) is True
         assert ran == ["detect_os 10.0.0.5"]
 
-    def test_exploits_run_when_explicitly_enabled(self):
-        assert _operator_handles([_exploit("10.0.0.5")], auto_approve_exploits=True) is True
+
+EXPLOITS = [
+    (_exploit("10.0.0.5"), "exploit 10.0.0.5"),
+    (
+        _call(
+            "metasploit_exploit",
+            "x1",
+            target="10.0.0.5",
+            exploit_module="exploit/unix/ftp/vsftpd_234_backdoor",
+        ),
+        "msf exploit exploit/unix/ftp/vsftpd_234_backdoor 10.0.0.5",
+    ),
+]
+
+NOT_EXPLOITS = [
+    (
+        _call("test_session_fixation", "r1", target="https://10.0.0.5"),
+        "session fixation https://10.0.0.5",
+    ),
+    (_kali("nmap -p80 10.0.0.5; id"), "nmap -p80 10.0.0.5; id"),
+    (
+        _kali("msfconsole -x 'use exploit/multi/handler'"),
+        "msfconsole -x 'use exploit/multi/handler'",
+    ),
+    (_call("metasploit_run_command", "m1", session_id=1, command="id"), "msf id"),
+    (_call("scan_ports", "s1", target="10.0.0.5"), "scan_ports 10.0.0.5"),
+]
+
+
+class TestOperatorAutoApprovesOnlyExploitTools:
+    """operator-auto-approve AutoApprovalRunsOnlyOptedInTools with auto_approve_exploits on."""
+
+    @pytest.mark.parametrize("call, expected_ran", EXPLOITS)
+    def test_opted_in_exploit_tools_run_without_asking(self, call, expected_ran):
+        asked = []
+
+        def on_escalate(question):
+            asked.append(question)
+            return "yes"
+
+        assert (
+            _operator_handles([call], auto_approve_exploits=True, on_escalate=on_escalate) is True
+        )
+        assert asked == []
+        assert ran == [expected_ran]
+
+    @pytest.mark.parametrize("answer, approved", [("y", True), ("yes", True), ("no", False)])
+    @pytest.mark.parametrize("call, expected_ran", NOT_EXPLOITS)
+    def test_other_gated_actions_still_ask_you(self, call, expected_ran, answer, approved):
+        asked = []
+
+        def on_escalate(question):
+            asked.append(question)
+            return answer
+
+        assert (
+            _operator_handles([call], auto_approve_exploits=True, on_escalate=on_escalate) is True
+        )
+        assert len(asked) == 1
+        assert ran == ([expected_ran] if approved else [])
+
+    @pytest.mark.parametrize("call", [call for call, _ in NOT_EXPLOITS])
+    def test_other_gated_actions_escalate_when_no_one_can_be_asked(self, call):
+        assert _operator_handles([call], auto_approve_exploits=True) is False
+        assert ran == []
+
+    def test_exploit_then_shell_line_in_one_turn_asks_only_for_the_shell_line(self):
+        asked = []
+
+        def on_escalate(question):
+            asked.append(question)
+            return "no"
+
+        calls = [_exploit("10.0.0.5"), _kali("nmap -p80 10.0.0.5; id")]
+        assert _operator_handles(calls, auto_approve_exploits=True, on_escalate=on_escalate) is True
+        assert asked == ["Approve running in Kali container: nmap -p80 10.0.0.5; id (yes/no)"]
         assert ran == ["exploit 10.0.0.5"]

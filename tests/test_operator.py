@@ -389,6 +389,7 @@ class TestHandleInterrupt:
 
         mock_interrupt = MagicMock()
         mock_interrupt.value = "Approve RCE exploit?"
+        mock_interrupt.tool_name = "exploit_vulnerability"
         mock_task = MagicMock()
         mock_task.interrupts = [mock_interrupt]
 
