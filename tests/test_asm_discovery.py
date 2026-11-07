@@ -82,6 +82,28 @@ def test_run_discovery_builds_the_hierarchy_and_respects_scope():
     assert "WordPress" in {a.value for a in result.assets if a.asset_type == "technology"}
 
 
+def test_wayback_urls_without_scoped_hosts_are_dropped(monkeypatch):
+    monkeypatch.setattr(
+        dt,
+        "wayback_urls",
+        lambda _domain: [
+            "https://api.example.com/v1",
+            "https://evil.example.net/secret",
+            "not-a-url",
+        ],
+    )
+    scope = Scope.from_domain("example.com", name="acme")
+
+    result = discovery.run_discovery(
+        scope,
+        discovery.DiscoveryOptions(passive=False, resolve=False, probe=False),
+    )
+
+    assert {asset.value for asset in result.assets if asset.asset_type == "url"} == {
+        "https://api.example.com/v1"
+    }
+
+
 def test_discovery_options_gate_steps():
     scope = Scope.from_domain("example.com", name="acme")
     passive_only = discovery.run_discovery(

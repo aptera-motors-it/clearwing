@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import clearwing.agent.tools.scan.scanner_tools as scanner_mod
 from clearwing.agent.graph import create_agent
 from clearwing.agent.prompts import build_system_prompt
 from clearwing.agent.state import AgentState
@@ -11,7 +12,13 @@ from clearwing.agent.tooling import tool
 from clearwing.agent.tools import get_all_tools
 from clearwing.agent.tools.meta.reporting_tools import generate_report
 from clearwing.agent.tools.meta.utility_tools import calculate_severity, validate_target
-from clearwing.agent.tools.scan.scanner_tools import detect_os, detect_services, scan_ports
+from clearwing.agent.tools.scan.scanner_tools import (
+    detect_os,
+    detect_services,
+    scan_ports,
+    scan_vulnerabilities,
+)
+from clearwing.core.config import Config
 
 
 class TestAgentState:
@@ -148,6 +155,19 @@ class TestGraphConstruction:
 
 
 class TestScannerToolWrapping:
+    @pytest.fixture(autouse=True)
+    def _configured_scope(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "asm:\n"
+            "  scopes:\n"
+            "    test:\n"
+            "      domains: [example.com]\n"
+            "      cidrs: [192.168.1.0/24]\n"
+        )
+        monkeypatch.setattr(Config, "DEFAULT_CONFIG_PATH", config_path)
+        monkeypatch.setattr(Config, "_USER_CONFIG_PATH", tmp_path / "missing-user-config.yaml")
+
     @pytest.mark.asyncio
     async def test_scan_ports_wraps_scanner(self):
         mock_result = [{"port": 22, "protocol": "tcp", "state": "open", "service": "SSH"}]
@@ -156,7 +176,13 @@ class TestScannerToolWrapping:
         mock_scanner.scan = AsyncMock(return_value=mock_result)
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch("clearwing.scanning.PortScanner", mock_class):
+        with (
+            patch("clearwing.scanning.PortScanner", mock_class),
+            patch(
+                "clearwing.agent.tools.scan.scanner_tools.interrupt",
+                return_value=True,
+            ) as approval,
+        ):
             await scan_ports.ainvoke(
                 {
                     "target": "192.168.1.1",
@@ -166,6 +192,10 @@ class TestScannerToolWrapping:
                 }
             )
             mock_scanner.scan.assert_called_once_with("192.168.1.1", [22], "connect", 10)
+            approval.assert_called_once_with(
+                "Approve port scan against target 192.168.1.1 "
+                "(ports=[22], type=connect, threads=10)?"
+            )
 
     @pytest.mark.asyncio
     async def test_detect_services_wraps_scanner(self):
@@ -176,7 +206,13 @@ class TestScannerToolWrapping:
         mock_scanner.detect = AsyncMock(return_value=mock_result)
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch("clearwing.scanning.ServiceScanner", mock_class):
+        with (
+            patch("clearwing.scanning.ServiceScanner", mock_class),
+            patch(
+                "clearwing.agent.tools.scan.scanner_tools.interrupt",
+                return_value=True,
+            ) as approval,
+        ):
             await detect_services.ainvoke(
                 {
                     "target": "192.168.1.1",
@@ -184,6 +220,9 @@ class TestScannerToolWrapping:
                 }
             )
             mock_scanner.detect.assert_called_once_with("192.168.1.1", ports)
+            approval.assert_called_once_with(
+                "Approve service detection against target 192.168.1.1 (ports=[80])?"
+            )
 
     @pytest.mark.asyncio
     async def test_detect_os_wraps_scanner(self):
@@ -191,9 +230,92 @@ class TestScannerToolWrapping:
         mock_scanner.detect = AsyncMock(return_value="Linux/Unix")
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch("clearwing.scanning.OSScanner", mock_class):
+        with (
+            patch("clearwing.scanning.OSScanner", mock_class),
+            patch(
+                "clearwing.agent.tools.scan.scanner_tools.interrupt",
+                return_value=True,
+            ) as approval,
+        ):
             await detect_os.ainvoke({"target": "192.168.1.1"})
             mock_scanner.detect.assert_called_once_with("192.168.1.1")
+            approval.assert_called_once_with(
+                "Approve OS detection against target 192.168.1.1?"
+            )
+
+    @pytest.mark.asyncio
+    async def test_scan_ports_refuses_declined_approval(self):
+        scanner = MagicMock()
+        scanner.scan = AsyncMock(return_value=[])
+
+        with (
+            patch.object(scanner_mod.scanning, "PortScanner", return_value=scanner),
+            pytest.raises(PermissionError, match="User declined port scan"),
+        ):
+            await scan_ports.with_resume_decision(False)({
+                "target": "192.168.1.1",
+                "ports": [22],
+                "scan_type": "connect",
+                "threads": 1,
+            })
+
+        scanner.scan.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool", "arguments", "scanner_name", "method"),
+        [
+            (
+                scan_ports,
+                {
+                    "target": "203.0.113.10",
+                    "ports": [80],
+                    "scan_type": "connect",
+                    "threads": 1,
+                },
+                "PortScanner",
+                "scan",
+            ),
+            (
+                detect_services,
+                {
+                    "target": "203.0.113.10",
+                    "open_ports": [{"port": 80}],
+                },
+                "ServiceScanner",
+                "detect",
+            ),
+            (
+                scan_vulnerabilities,
+                {
+                    "target": "203.0.113.10",
+                    "services": [{"port": 80, "service": "HTTP"}],
+                },
+                "VulnerabilityScanner",
+                "scan",
+            ),
+            (
+                detect_os,
+                {"target": "203.0.113.10"},
+                "OSScanner",
+                "detect",
+            ),
+        ],
+    )
+    async def test_scan_tools_refuse_out_of_scope_target(
+        self, tool, arguments, scanner_name, method
+    ):
+        scanner = MagicMock()
+        setattr(scanner, method, AsyncMock(return_value=[]))
+        scanner.close = AsyncMock()
+
+        with (
+            patch.object(scanner_mod.scanning, scanner_name, return_value=scanner),
+            pytest.raises(PermissionError, match="outside configured engagement scope"),
+        ):
+            await tool.with_resume_decision(True)(arguments)
+
+        getattr(scanner, method).assert_not_awaited()
 
 
 class TestUtilityTools:

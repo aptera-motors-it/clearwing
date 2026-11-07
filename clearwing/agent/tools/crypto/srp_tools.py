@@ -7,6 +7,7 @@ import logging
 import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any
 
 from clearwing.agent.tooling import interrupt, tool
@@ -121,6 +122,13 @@ def srp_handshake(
     group = SRP_GROUPS.get(group_bits)
     if not group:
         return {"success": False, "error": f"Unknown SRP group: {group_bits}"}
+
+    if not interrupt(
+        f"Approve SRP handshake for {username} against {target} "
+        f"(init={auth_init_path}, verify={auth_verify_path}; "
+        "sends the account identifier and SRP proof)?"
+    ):
+        return {"success": False, "error": "User declined SRP handshake"}
 
     client = SRPClient(group)
     result: dict[str, Any] = {"target": target, "username": username, "group_bits": group_bits}
@@ -345,6 +353,13 @@ def srp_extract_verifier_info(
     Returns:
         Dict with SRP parameters and username enumeration analysis.
     """
+    if not interrupt(
+        f"Approve SRP verifier-parameter probe for {username} against {target} "
+        f"(init={auth_init_path}; sends the account identifier"
+        f"{' and an invalid comparison identifier' if test_invalid else ''})?"
+    ):
+        return {"success": False, "error": "User declined verifier probe"}
+
     init_url = f"{target.rstrip('/')}{auth_init_path}"
 
     status, _, body, ms = _http_post(init_url, {"email": username})
@@ -371,8 +386,6 @@ def srp_extract_verifier_info(
     result: dict[str, Any] = {"target": target, "username": username, "valid_user": valid_result}
 
     if test_invalid:
-        import uuid
-
         fake_email = f"nonexistent-{uuid.uuid4().hex[:8]}@invalid.test"
         status_inv, _, body_inv, ms_inv = _http_post(init_url, {"email": fake_email})
         invalid_result: dict[str, Any] = {"status": status_inv, "response_ms": round(ms_inv, 2)}
@@ -450,8 +463,6 @@ def srp_timing_attack(
     label_b = ""
 
     if test_type == "username":
-        import uuid
-
         label_a = "valid_user"
         label_b = "invalid_user"
         fake_email = f"nonexistent-{uuid.uuid4().hex[:8]}@invalid.test"
