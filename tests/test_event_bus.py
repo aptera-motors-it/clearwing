@@ -18,7 +18,9 @@ so the suite is independent of prior state.
 
 from __future__ import annotations
 
-from clearwing.core.events import EventBus, EventType
+import asyncio
+
+from clearwing.core.events import EventBus, EventType, current_session_id
 
 
 def _reset_bus() -> None:
@@ -203,3 +205,79 @@ class TestSubscriberExceptionResilience:
         # For each emit: early appends i*10, boom raises (swallowed), late
         # appends i. So we expect [10, 1, 20, 2, 30, 3].
         assert received == [10, 1, 20, 2, 30, 3]
+
+
+class TestSessionStamping:
+    """Session-private payloads carry the emitting session's id (audit 31)."""
+
+    def setup_method(self) -> None:
+        _reset_bus()
+
+    def teardown_method(self) -> None:
+        _reset_bus()
+
+    def test_dict_payload_is_stamped_inside_a_session(self) -> None:
+        bus = EventBus()
+        received: list[dict] = []
+        bus.subscribe(EventType.TOOL_RESULT, received.append)
+
+        token = current_session_id.set("s1")
+        try:
+            bus.emit_tool("scan_ports", "result", {"host": "10.0.0.5"})
+        finally:
+            current_session_id.reset(token)
+
+        assert received[0]["session_id"] == "s1"
+        assert received[0]["tool"] == "scan_ports"
+
+    def test_payload_without_a_session_is_untouched(self) -> None:
+        bus = EventBus()
+        received: list[dict] = []
+        bus.subscribe(EventType.FLAG_FOUND, received.append)
+
+        bus.emit_flag("FLAG{x}")
+
+        assert "session_id" not in received[0]
+
+    def test_caller_dict_is_not_mutated(self) -> None:
+        bus = EventBus()
+        payload = {"flag": "FLAG{x}"}
+
+        token = current_session_id.set("s1")
+        try:
+            bus.emit(EventType.FLAG_FOUND, payload)
+        finally:
+            current_session_id.reset(token)
+
+        assert payload == {"flag": "FLAG{x}"}
+
+    def test_explicit_session_id_is_kept(self) -> None:
+        bus = EventBus()
+        received: list[dict] = []
+        bus.subscribe(EventType.FLAG_FOUND, received.append)
+
+        token = current_session_id.set("s1")
+        try:
+            bus.emit(EventType.FLAG_FOUND, {"flag": "f", "session_id": "other"})
+        finally:
+            current_session_id.reset(token)
+
+        assert received[0]["session_id"] == "other"
+
+    def test_concurrent_sessions_are_stamped_independently(self) -> None:
+        bus = EventBus()
+        received: list[dict] = []
+        bus.subscribe(EventType.TOOL_RESULT, received.append)
+
+        async def run(sid: str) -> None:
+            current_session_id.set(sid)
+            await asyncio.sleep(0)
+            await asyncio.to_thread(bus.emit_tool, "t", "result", sid)
+
+        async def main() -> None:
+            await asyncio.gather(run("a"), run("b"))
+
+        asyncio.run(main())
+
+        assert sorted(e["session_id"] for e in received) == ["a", "b"]
+        assert all(e["data"] == e["session_id"] for e in received)
