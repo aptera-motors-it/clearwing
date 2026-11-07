@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shlex
 import time
 import uuid
 from collections.abc import Callable
@@ -22,6 +23,46 @@ from clearwing.agent.runtime import Command
 from clearwing.providers import ProviderManager
 
 logger = logging.getLogger(__name__)
+
+_AUTO_APPROVED_SCAN_TOOLS = frozenset(
+    {
+        "scan_ports",
+        "detect_services",
+        "scan_vulnerabilities",
+        "detect_os",
+        "enumerate_cipher_suites",
+    }
+)
+
+# nmap discovery options only: no NSE scripts (-sC, -A, --script), no file
+# input/output (-i*, -o*), no data/script directories.
+_NMAP_DISCOVERY_OPTION = re.compile(
+    r"-(p\S*|s[STUVn]+|Pn|O|F|n|6|T[0-5]|v+|-open|-reason|-top-ports(=\d+)?|-version-intensity(=\d)?)"
+)
+_SHELL_SYNTAX = re.compile(r"[;&|`$<>(){}\\\n]")
+
+
+def _is_plain_nmap_scan(command: str) -> bool:
+    if _SHELL_SYNTAX.search(command):
+        return False
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    return (
+        bool(argv)
+        and argv[0] == "nmap"
+        and all(_NMAP_DISCOVERY_OPTION.fullmatch(arg) for arg in argv[1:] if arg.startswith("-"))
+    )
+
+
+def _is_auto_approvable_scan(intr) -> bool:
+    """Classify by the gated tool's identity and arguments, never by prompt text."""
+    if intr.tool_name in _AUTO_APPROVED_SCAN_TOOLS:
+        return True
+    return intr.tool_name == "kali_execute" and _is_plain_nmap_scan(
+        str(intr.tool_args.get("command", ""))
+    )
 
 
 @dataclass
@@ -43,7 +84,7 @@ class OperatorConfig:
     max_turns: int = 100  # max inner-agent turns before force-stop
     timeout_minutes: int = 60
     cost_limit: float = 0.0  # 0 = no limit
-    auto_approve_scans: bool = True  # auto-approve non-destructive scan tools
+    auto_approve_scans: bool = False  # opt in to approving scan tools without asking
     auto_approve_exploits: bool = False  # require user for exploit approval
     lhost: str = "host.docker.internal"  # callback address reachable from target
     lport: int = 9999  # preferred callback-listener port
@@ -228,9 +269,9 @@ class OperatorAgent:
                             config,
                             start,
                             "escalated",
-                            escalation_question="Exploit approval required — "
-                            "please review and re-run with auto_approve_exploits=True "
-                            "if authorized.",
+                            escalation_question="Approval required for a gated action — "
+                            "please review it and re-run with auto_approve_scans=True "
+                            "for scan tools, or auto_approve_exploits=True if authorized.",
                         )
                     continue
 
@@ -357,22 +398,26 @@ class OperatorAgent:
                 prompt = str(intr.value)
                 self._emit("approval", prompt)
 
-                # Decide whether to auto-approve
-                is_scan = any(
-                    kw in prompt.lower()
-                    for kw in ["scan", "detect", "enumerate", "fingerprint", "nmap"]
-                )
-                if is_scan and self.config.auto_approve_scans:
+                # A resume answers only this call; another gated call in the
+                # same turn surfaces as a new interrupt and is decided on its own.
+                if self.config.auto_approve_scans and _is_auto_approvable_scan(intr):
                     await graph.ainvoke(Command(resume=True), config)
                     self._progress.append(f"Auto-approved scan: {prompt[:100]}")
-                    return True
+                    return await self._ahandle_interrupt(graph.get_state(config), graph, config)
 
                 if self.config.auto_approve_exploits:
                     await graph.ainvoke(Command(resume=True), config)
                     self._progress.append(f"Auto-approved exploit: {prompt[:100]}")
-                    return True
+                    return await self._ahandle_interrupt(graph.get_state(config), graph, config)
 
-                # Cannot auto-approve — need user
+                if self.config.on_escalate:
+                    answer = self.config.on_escalate(f"{prompt} (yes/no)")
+                    approved = answer.strip().lower() in ("y", "yes")
+                    await graph.ainvoke(Command(resume=approved), config)
+                    verdict = "Approved" if approved else "Declined"
+                    self._progress.append(f"{verdict} by user: {prompt[:100]}")
+                    return await self._ahandle_interrupt(graph.get_state(config), graph, config)
+
                 return False
 
         return True

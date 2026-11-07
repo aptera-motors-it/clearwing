@@ -41,7 +41,7 @@ class TestOperatorConfig:
         assert cfg.model == "claude-sonnet-4-6"
         assert cfg.max_turns == 100
         assert cfg.timeout_minutes == 60
-        assert cfg.auto_approve_scans is True
+        assert cfg.auto_approve_scans is False
         assert cfg.auto_approve_exploits is False
         assert cfg.cost_limit == 0.0
         assert cfg.lhost == "host.docker.internal"
@@ -344,6 +344,7 @@ class TestHandleInterrupt:
 
         mock_interrupt = MagicMock()
         mock_interrupt.value = "Approve scan of port 80?"
+        mock_interrupt.tool_name = "scan_ports"
         mock_task = MagicMock()
         mock_task.interrupts = [mock_interrupt]
 
