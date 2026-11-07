@@ -17,6 +17,7 @@ jobs:
   gate:
     name: CI gate
     runs-on: ubuntu-latest
+    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -36,7 +37,9 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install package
-        run: uv pip install --system -e '.[dev]'
+        run: |
+          uv sync --frozen --all-extras
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Ruff check
         run: ruff check clearwing/ tests/
@@ -62,6 +65,7 @@ jobs:
     name: Build and publish release
     needs: gate
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - uses: actions/checkout@v7
         with:
@@ -79,7 +83,9 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install build dependencies
-        run: uv pip install --system -e '.[dev]'
+        run: |
+          uv sync --frozen --all-extras
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Build wheel + sdist
         run: python -m build
