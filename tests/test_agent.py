@@ -156,7 +156,13 @@ class TestScannerToolWrapping:
         mock_scanner.scan = AsyncMock(return_value=mock_result)
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch("clearwing.scanning.PortScanner", mock_class):
+        with (
+            patch("clearwing.scanning.PortScanner", mock_class),
+            patch(
+                "clearwing.agent.tools.scan.scanner_tools.interrupt",
+                return_value=True,
+            ) as approval,
+        ):
             await scan_ports.ainvoke(
                 {
                     "target": "192.168.1.1",
@@ -166,6 +172,10 @@ class TestScannerToolWrapping:
                 }
             )
             mock_scanner.scan.assert_called_once_with("192.168.1.1", [22], "connect", 10)
+            approval.assert_called_once_with(
+                "Approve port scan against target 192.168.1.1 "
+                "(ports=[22], type=connect, threads=10)?"
+            )
 
     @pytest.mark.asyncio
     async def test_detect_services_wraps_scanner(self):
@@ -176,7 +186,13 @@ class TestScannerToolWrapping:
         mock_scanner.detect = AsyncMock(return_value=mock_result)
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch("clearwing.scanning.ServiceScanner", mock_class):
+        with (
+            patch("clearwing.scanning.ServiceScanner", mock_class),
+            patch(
+                "clearwing.agent.tools.scan.scanner_tools.interrupt",
+                return_value=True,
+            ) as approval,
+        ):
             await detect_services.ainvoke(
                 {
                     "target": "192.168.1.1",
@@ -184,6 +200,9 @@ class TestScannerToolWrapping:
                 }
             )
             mock_scanner.detect.assert_called_once_with("192.168.1.1", ports)
+            approval.assert_called_once_with(
+                "Approve service detection against target 192.168.1.1 (ports=[80])?"
+            )
 
     @pytest.mark.asyncio
     async def test_detect_os_wraps_scanner(self):
@@ -191,9 +210,18 @@ class TestScannerToolWrapping:
         mock_scanner.detect = AsyncMock(return_value="Linux/Unix")
         mock_class = MagicMock(return_value=mock_scanner)
 
-        with patch("clearwing.scanning.OSScanner", mock_class):
+        with (
+            patch("clearwing.scanning.OSScanner", mock_class),
+            patch(
+                "clearwing.agent.tools.scan.scanner_tools.interrupt",
+                return_value=True,
+            ) as approval,
+        ):
             await detect_os.ainvoke({"target": "192.168.1.1"})
             mock_scanner.detect.assert_called_once_with("192.168.1.1")
+            approval.assert_called_once_with(
+                "Approve OS detection against target 192.168.1.1?"
+            )
 
 
 class TestUtilityTools:

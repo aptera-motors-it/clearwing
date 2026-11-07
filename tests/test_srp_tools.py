@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
+from unittest.mock import patch
 
 from clearwing.agent.tools.crypto.srp_tools import (
     get_srp_tools,
@@ -36,27 +36,43 @@ class TestGetSRPTools:
 
 class TestSRPHandshakeUnreachable:
     def test_connection_failure(self):
-        result = srp_handshake.invoke({
-            "target": "http://127.0.0.1:1",
-            "username": "test@example.com",
-        })
+        with patch(
+            "clearwing.agent.tools.crypto.srp_tools.interrupt",
+            return_value=True,
+        ) as approval:
+            result = srp_handshake.invoke({
+                "target": "http://127.0.0.1:1",
+                "username": "test@example.com",
+            })
         assert result["success"] is False
         assert "error" in result or "Connection" in str(result)
+        approval.assert_called_once_with(
+            "Approve SRP handshake for test@example.com against http://127.0.0.1:1 "
+            "(init=/api/v1/auth, verify=/api/v1/auth/verify; "
+            "sends the account identifier and SRP proof)?"
+        )
 
 
 class TestSRPExtractUnreachable:
     def test_connection_failure(self):
-        result = srp_extract_verifier_info.invoke({
-            "target": "http://127.0.0.1:1",
-            "username": "test@example.com",
-        })
+        with patch(
+            "clearwing.agent.tools.crypto.srp_tools.interrupt",
+            return_value=True,
+        ) as approval:
+            result = srp_extract_verifier_info.invoke({
+                "target": "http://127.0.0.1:1",
+                "username": "test@example.com",
+            })
         assert result.get("success") is False or "error" in str(result)
+        approval.assert_called_once_with(
+            "Approve SRP verifier-parameter probe for test@example.com against "
+            "http://127.0.0.1:1 (init=/api/v1/auth; sends the account identifier "
+            "and an invalid comparison identifier)?"
+        )
 
 
 class TestSRPFuzzNoInterrupt:
     def test_returns_error_when_declined(self):
-        from unittest.mock import patch
-
         with patch("clearwing.agent.tools.crypto.srp_tools.interrupt", return_value=False):
             result = srp_fuzz_parameters.invoke({
                 "target": "http://127.0.0.1:1",
@@ -68,8 +84,6 @@ class TestSRPFuzzNoInterrupt:
 
 class TestSRPTimingNoInterrupt:
     def test_returns_error_when_declined(self):
-        from unittest.mock import patch
-
         with patch("clearwing.agent.tools.crypto.srp_tools.interrupt", return_value=False):
             result = srp_timing_attack.invoke({
                 "target": "http://127.0.0.1:1",
@@ -81,8 +95,6 @@ class TestSRPTimingNoInterrupt:
 
 class TestSRPTimingValidation:
     def test_rejects_too_few_samples(self):
-        from unittest.mock import patch
-
         with patch("clearwing.agent.tools.crypto.srp_tools.interrupt", return_value=True):
             result = srp_timing_attack.invoke({
                 "target": "http://127.0.0.1:1",
@@ -93,8 +105,6 @@ class TestSRPTimingValidation:
             assert "samples" in result["error"].lower()
 
     def test_rejects_unknown_test_type(self):
-        from unittest.mock import patch
-
         with patch("clearwing.agent.tools.crypto.srp_tools.interrupt", return_value=True):
             result = srp_timing_attack.invoke({
                 "target": "http://127.0.0.1:1",
@@ -106,8 +116,6 @@ class TestSRPTimingValidation:
 
 class TestSRPFuzzUnknownVectors:
     def test_rejects_unknown_category(self):
-        from unittest.mock import patch
-
         with patch("clearwing.agent.tools.crypto.srp_tools.interrupt", return_value=True):
             result = srp_fuzz_parameters.invoke({
                 "target": "http://127.0.0.1:1",
