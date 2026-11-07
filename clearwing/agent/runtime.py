@@ -83,6 +83,8 @@ class Command:
 @dataclass(slots=True)
 class GraphInterrupt:
     value: str
+    tool_name: str
+    tool_args: dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -101,6 +103,14 @@ class GraphStateSnapshot:
 class _PendingToolResume:
     tool_calls: list[Any]
     prompt: str
+    tool_name: str
+    tool_args: dict[str, Any]
+
+
+@dataclass(slots=True)
+class _RequestUsage:
+    steps: int = 0
+    tool_calls: int = 0
 
 
 class NativeAgentGraph:
@@ -140,6 +150,7 @@ class NativeAgentGraph:
         self.on_text_delta: Callable[[str], None] | None = None
         self._state: dict[str, dict[str, Any]] = {}
         self._pending: dict[str, _PendingToolResume | None] = {}
+        self._usage: dict[str, _RequestUsage] = {}
 
         self.cost_tracker = (
             CostTracker() if enable_cost_tracker and capabilities.has("telemetry") else None
@@ -191,6 +202,7 @@ class NativeAgentGraph:
 
         state = self._get_or_create_state(thread_id)
         self._merge_input(state, input_data)
+        self._usage[thread_id] = _RequestUsage()
         async for event in self._arun_loop(thread_id):
             yield event
 
@@ -210,7 +222,17 @@ class NativeAgentGraph:
         return GraphStateSnapshot(
             values=state,
             next=("tools",),
-            tasks=[GraphTask(interrupts=[GraphInterrupt(value=pending.prompt)])],
+            tasks=[
+                GraphTask(
+                    interrupts=[
+                        GraphInterrupt(
+                            value=pending.prompt,
+                            tool_name=pending.tool_name,
+                            tool_args=pending.tool_args,
+                        )
+                    ]
+                )
+            ],
         )
 
     async def _aresume(self, thread_id: str, approved: bool):
@@ -234,23 +256,22 @@ class NativeAgentGraph:
         limits = self.agent_limits
         max_steps = limits.max_steps if limits else None
         max_tool_calls = limits.max_tool_calls if limits else None
-        steps = 0
-        tool_calls_total = 0
+        usage = self._usage.setdefault(thread_id, _RequestUsage())
         while True:
-            if max_steps is not None and steps >= max_steps:
+            if max_steps is not None and usage.steps >= max_steps:
                 logger.info("agent loop stopped: reached max_steps=%d", max_steps)
                 break
             assistant_event = await self._aassistant_step(state)
-            steps += 1
+            usage.steps += 1
             yield assistant_event
             last = state["messages"][-1]
             tool_calls = getattr(last, "tool_calls", []) or []
             if not tool_calls:
                 break
-            if max_tool_calls is not None and tool_calls_total >= max_tool_calls:
+            if max_tool_calls is not None and usage.tool_calls + len(tool_calls) > max_tool_calls:
                 logger.info("agent loop stopped: reached max_tool_calls=%d", max_tool_calls)
                 break
-            tool_calls_total += len(tool_calls)
+            usage.tool_calls += len(tool_calls)
             tool_events, paused = await self._arun_tool_calls(
                 state, tool_calls, resume_decision=Ellipsis
             )
@@ -369,18 +390,31 @@ class NativeAgentGraph:
             if self.event_bus:
                 self.event_bus.emit(EventType.TOOL_START, {"tool": tool_name, "args": tool_args})
 
+            blocked = None
             if self.output_guardrail and tool_name in self.output_guardrail_tool_names:
                 command = tool_args.get("command", "")
                 result = self.output_guardrail.check_command(command)
-                if not result.passed and self.event_bus:
-                    self.event_bus.emit_message(f"Guardrail blocked: {result.reason}", "warning")
+                if not result.passed:
+                    blocked = json.dumps(
+                        {"error": "blocked_by_output_guardrail", "reason": result.reason}
+                    )
+                    if self.event_bus:
+                        self.event_bus.emit_message(
+                            f"Guardrail blocked: {result.reason}", "warning"
+                        )
 
             tool = self.tools.get(tool_name)
-            if tool is None:
+            if blocked:
+                content = blocked
+            elif tool is None:
                 content = json.dumps({"error": f"unknown tool: {tool_name}"})
             else:
+                # A resume decision answers only the call that raised the
+                # interrupt, which is always first in a resumed batch; later
+                # gated calls must ask for their own approval.
+                decision = resume_decision if index == 0 else Ellipsis
                 try:
-                    content = await self._ainvoke_tool(tool, tool_args, resume_decision)
+                    content = await self._ainvoke_tool(tool, tool_args, decision)
                 except InterruptRequest as exc:
                     if result_messages:  # preserve earlier parallel tool_results so their tool_use blocks aren't orphaned in history
                         state.setdefault("messages", []).extend(result_messages)
@@ -388,6 +422,8 @@ class NativeAgentGraph:
                     self._pending[self._find_thread_id_for_state(state)] = _PendingToolResume(
                         tool_calls=tool_calls[index:],
                         prompt=exc.prompt,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
                     )
                     return events, True
                 except Exception as exc:
@@ -395,6 +431,15 @@ class NativeAgentGraph:
 
             if not isinstance(content, str):
                 content = json.dumps(content)
+
+            if self.input_guardrail and tool_name in self.input_guardrail_tool_names:
+                gr = self.input_guardrail.check(content)
+                if not gr.passed:
+                    content = json.dumps({"error": "blocked_by_input_guardrail"})
+                    if self.event_bus:
+                        self.event_bus.emit_message(
+                            f"Input guardrail blocked: {gr.reason}", "warning"
+                        )
 
             # Cap the copy that enters the model conversation so a single huge
             # tool result (a full port scan, HTTP body, or shell dump) cannot
@@ -416,11 +461,6 @@ class NativeAgentGraph:
                 tool_call_id=tool_call_id,
             )
             result_messages.append(message)
-
-            if self.input_guardrail and tool_name in self.input_guardrail_tool_names:
-                gr = self.input_guardrail.check(content)
-                if not gr.passed and self.event_bus:
-                    self.event_bus.emit_message(f"Input guardrail warning: {gr.reason}", "warning")
 
             if self.episodic_memory:
                 target = state.get("target") or "unknown"
