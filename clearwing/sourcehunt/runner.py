@@ -37,7 +37,7 @@ from clearwing.providers import (
     ProviderManager,
     resolve_llm_endpoint,
 )
-from clearwing.reporting.safety import redact_tree
+from clearwing.reporting.safety import redact_text, redact_tree
 
 from ..sandbox.hunter_sandbox import HunterSandbox
 from .checkpoints import (
@@ -2623,7 +2623,12 @@ class SourceHuntRunner:
             # 5.5. v0.3: Auto-patch mode (opt-in).
             # The verify-by-recompile gate is MANDATORY — a patch is only marked
             # `validated` if we actually applied it, rebuilt, and re-ran the PoC.
-            if self.enable_auto_patch and verified and not self._budget_exhausted():
+            if (
+                self.enable_auto_patch
+                and verified
+                and self._stop_after != "exploit"
+                and not self._budget_exhausted()
+            ):
                 patcher_llm = self._get_native_client(
                     "sourcehunt_exploit",
                     self.exploiter_llm,
@@ -2875,6 +2880,7 @@ class SourceHuntRunner:
             or f"fix: {finding.get('finding_type', 'vulnerability')} "
             f"in {finding.get('file', 'unknown')}"
         )
+        diff = redact_text(attempt.diff)[:3000]
         body = (
             f"## Auto-generated patch from clearwing sourcehunt\n\n"
             f"**Finding:** {finding.get('id', '')}\n"
@@ -2883,9 +2889,11 @@ class SourceHuntRunner:
             f"**Evidence level:** {finding.get('evidence_level', '')}\n\n"
             f"### Description\n{finding.get('description', '')}\n\n"
             f"### Fix explanation\n{attempt.explanation}\n\n"
-            f"### Diff\n```\n{attempt.diff[:3000]}\n```\n\n"
+            f"### Diff\n```\n{diff}\n```\n\n"
             f"**Human review required before merge.**\n"
         )
+        title = redact_text(title)
+        body = redact_text(body)
         try:
             subprocess.run(
                 ["gh", "pr", "create", "--draft", "--title", title, "--body", body],

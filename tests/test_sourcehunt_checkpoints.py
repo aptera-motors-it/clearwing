@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from clearwing.analysis.source_analyzer import AnalyzerFinding
+from clearwing.sourcehunt import runner as runner_module
 from clearwing.sourcehunt.callgraph import CallGraph, FunctionInfo
 from clearwing.sourcehunt.checkpoints import (
     ExploitationCheckpoint,
@@ -813,6 +816,97 @@ def test_stop_after_verify_returns_accumulated_verification_result(tmp_path: Pat
     assert [finding.id for finding in result.verified_findings] == ["verified-1"]
     assert result.exploited_findings == []
     assert result.files_hunted == 1
+
+
+def test_stop_after_exploit_never_consults_auto_patcher(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.c").write_text("int sample(void);\n", encoding="utf-8")
+    runner = SourceHuntRunner(
+        repo_url=str(repo),
+        local_path=str(repo),
+        output_dir=str(tmp_path / "results"),
+        stop_after="exploit",
+        enable_auto_patch=True,
+        no_rank=True,
+        enable_mechanism_memory=False,
+        enable_calibration=False,
+        enable_knowledge_graph=False,
+        enable_subsystem_hunt=False,
+    )
+    monkeypatch.setattr(runner, "_ensure_sandbox_factory", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runner, "_get_native_client", lambda *args, **kwargs: object())
+
+    hunt_finding = Finding(id="hunt-1", file="sample.c", severity="high")
+    verified_finding = Finding(
+        id="verified-1",
+        file="sample.c",
+        severity="high",
+        verified=True,
+        evidence_level="root_cause_explained",
+    )
+
+    async def fake_hunt(**kwargs):
+        return HuntResult(
+            findings=[hunt_finding],
+            files_hunted=1,
+            spent_per_tier={"A": 1.25, "B": 0.0, "C": 0.0},
+        )
+
+    async def fake_verify(*args, **kwargs):
+        return VerificationResult(verified=[verified_finding], rejected=[])
+
+    async def fake_exploit(verified, **kwargs):
+        return ExploitationResult(verified=verified, exploited=[])
+
+    monkeypatch.setattr(runner, "_hunt", fake_hunt)
+    monkeypatch.setattr(runner, "_verify", fake_verify)
+    monkeypatch.setattr(runner, "_exploit", fake_exploit)
+    patcher = MagicMock()
+    patcher.return_value.is_eligible.return_value = False
+    monkeypatch.setattr(runner_module, "AutoPatcher", patcher)
+
+    result = runner.run()
+
+    assert [finding.id for finding in result.verified_findings] == ["verified-1"]
+    patcher.assert_not_called()
+
+
+def test_open_draft_pr_redacts_title_body_and_diff():
+    title_secret = "title-secret-value-999"
+    body_secret = "body-secret-value-999"
+    diff_secret = "diff-secret-value-999"
+    finding = Finding(
+        id="finding-1",
+        file="sample.c",
+        line_number=7,
+        finding_type="hardcoded_secret",
+        description=f"password = {body_secret}",
+        evidence_level="patch_validated",
+    )
+    attempt = SimpleNamespace(
+        commit_message=f"fix api_key = {title_secret}",
+        explanation=f"Remove password = {body_secret}",
+        diff=f"-client_secret = {diff_secret}\n+client_secret = os.environ['CLIENT_SECRET']",
+    )
+    runner = object.__new__(SourceHuntRunner)
+
+    with (
+        patch("clearwing.sourcehunt.runner.shutil.which", return_value="/usr/bin/gh"),
+        patch("clearwing.sourcehunt.runner.subprocess.run") as run,
+    ):
+        runner._open_draft_pr(finding, attempt)
+
+    argv = run.call_args.args[0]
+    title = argv[argv.index("--title") + 1]
+    body = argv[argv.index("--body") + 1]
+    diff = body.split("### Diff\n```\n", 1)[1].split("\n```", 1)[0]
+    assert title_secret not in title
+    assert body_secret not in body
+    assert diff_secret not in diff
+    assert "[REDACTED-SECRET]" in title
+    assert "[REDACTED-SECRET]" in body
+    assert "[REDACTED-SECRET]" in diff
 
 
 @pytest.mark.asyncio

@@ -205,6 +205,23 @@ class TestAnnotationConstruction:
         assert "raw_details" in ann
         assert "AddressSanitizer" in ann["raw_details"]
 
+    def test_annotation_redacts_message_and_raw_details(self):
+        secret = "super-secret-value-999"
+        publisher = GitHubChecksPublisher(GitHubChecksConfig(repo_path="/tmp"))
+        ann = publisher._build_annotations(
+            [
+                _finding(
+                    description=f"password = {secret}",
+                    crash_evidence=f"api_key = {secret}",
+                ),
+            ]
+        )[0]
+
+        assert secret not in ann["message"]
+        assert secret not in ann["raw_details"]
+        assert "[REDACTED-SECRET]" in ann["message"]
+        assert "[REDACTED-SECRET]" in ann["raw_details"]
+
     def test_annotation_includes_counter_argument(self):
         publisher = GitHubChecksPublisher(GitHubChecksConfig(repo_path="/tmp"))
         ann = publisher._build_annotations(
