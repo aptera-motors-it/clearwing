@@ -28,6 +28,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
+from clearwing.reporting.safety import redact_tree
+
 from .state import Finding
 
 logger = logging.getLogger(__name__)
@@ -302,6 +304,7 @@ class GitHubChecksPublisher:
         """Turn Findings into GitHub check-run annotation dicts."""
         annotations: list[dict] = []
         for f in findings:
+            f = redact_tree(f)
             path = f.get("file")
             line = f.get("line_number")
             if not path or not line:
