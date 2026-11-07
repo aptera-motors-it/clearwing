@@ -1,9 +1,13 @@
 """Tests for the white-box source analysis module."""
 
 import os
+import subprocess
 import tempfile
 import textwrap
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from clearwing.analysis.source_analyzer import AnalysisResult, AnalyzerFinding, SourceAnalyzer
 from clearwing.analysis.taint_tracker import TAINT_SINKS, TAINT_SOURCES, TaintFlow, TaintTracker
@@ -432,6 +436,53 @@ class TestTaintTracker:
         assert "execute" in TAINT_SINKS
         assert "eval" in TAINT_SINKS
         assert "os.system" in TAINT_SINKS
+
+
+class TestSourceAnalyzerClone:
+    """Audit #25: git clone must not treat the repository operand as an option."""
+
+    def test_clone_places_end_of_options_before_repo_url(self):
+        recorded: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            recorded.append(list(argv))
+            if "--branch" in argv:
+                raise subprocess.CalledProcessError(128, argv)
+            return subprocess.CompletedProcess(argv, 0)
+
+        url = "https://example.com/repo.git"
+        with patch("clearwing.analysis.source_analyzer.subprocess.run", side_effect=fake_run):
+            with SourceAnalyzer() as analyzer:
+                analyzer.clone(url, branch="main")
+
+        assert len(recorded) == 2
+        for argv in recorded:
+            url_index = argv.index(url)
+            assert argv[url_index - 1] == "--"
+            assert argv[url_index + 1]
+
+    def test_sha_clone_places_end_of_options_before_repo_url(self):
+        recorded: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            recorded.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0)
+
+        url = "https://example.com/repo.git"
+        sha = "a" * 40
+        with patch("clearwing.analysis.source_analyzer.subprocess.run", side_effect=fake_run):
+            with SourceAnalyzer() as analyzer:
+                analyzer.clone(url, branch=sha)
+
+        clone_argv = recorded[0]
+        url_index = clone_argv.index(url)
+        assert clone_argv[url_index - 1] == "--"
+
+    def test_clone_rejects_option_shaped_repo_url(self):
+        with patch("clearwing.analysis.source_analyzer.subprocess.run") as run:
+            with pytest.raises(ValueError):
+                SourceAnalyzer().clone("--config=core.sshCommand=id.git", branch="main")
+        run.assert_not_called()
 
 
 class TestTaintFlow:

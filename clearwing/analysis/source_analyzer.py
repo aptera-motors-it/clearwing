@@ -515,18 +515,20 @@ class SourceAnalyzer:
         Returns:
             Path to the cloned repository.
         """
+        if not git_url or git_url.startswith("-") or branch.startswith("-"):
+            raise ValueError("git clone operands must not be empty or option-shaped")
         self._temp_dir = tempfile.TemporaryDirectory(prefix="clearwing-src-")
         clone_path = self._temp_dir.name
         if re.fullmatch(r"[0-9a-f]{40}", branch):
             subprocess.run(
-                ["git", "clone", "--filter=blob:none", "--no-checkout", git_url, clone_path],
+                ["git", "clone", "--filter=blob:none", "--no-checkout", "--", git_url, clone_path],
                 capture_output=True,
                 text=True,
                 timeout=300,
                 check=True,
             )
             subprocess.run(
-                ["git", "-C", clone_path, "checkout", branch],
+                ["git", "-C", clone_path, "checkout", "--", branch],
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -535,7 +537,7 @@ class SourceAnalyzer:
         else:
             try:
                 subprocess.run(
-                    ["git", "clone", "--depth", "1", "--branch", branch, git_url, clone_path],
+                    ["git", "clone", "--depth", "1", "--branch", branch, "--", git_url, clone_path],
                     capture_output=True,
                     text=True,
                     timeout=120,
@@ -543,7 +545,7 @@ class SourceAnalyzer:
                 )
             except subprocess.CalledProcessError:
                 subprocess.run(
-                    ["git", "clone", "--depth", "1", git_url, clone_path],
+                    ["git", "clone", "--depth", "1", "--", git_url, clone_path],
                     capture_output=True,
                     text=True,
                     timeout=120,

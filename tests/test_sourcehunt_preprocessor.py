@@ -329,6 +329,9 @@ class TestIsGitUrl:
     def test_local_path_not_git(self):
         assert not Preprocessor._is_git_url("/tmp/some/dir")
 
+    def test_option_shaped_dot_git_is_not_a_url(self):
+        assert not Preprocessor._is_git_url("--config=core.sshCommand=id.git")
+
 
 def _init_git_repo(path: Path, files: dict[str, str]) -> str:
     """Init a git repo with the given files, return HEAD SHA."""
