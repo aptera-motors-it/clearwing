@@ -11,6 +11,8 @@ import clearwing.agent.tools.recon.bundle_tools as bun_mod
 import clearwing.agent.tools.recon.discovery_tools as disc_mod
 import clearwing.agent.tools.recon.mitm_proxy as mitm_mod
 import clearwing.agent.tools.recon.proxy_tools as proxy_mod
+import clearwing.ui.commands.asm as asm_cmd
+from clearwing.agent.tooling import tool_execution_context
 
 
 @pytest.fixture(autouse=True)
@@ -193,3 +195,34 @@ class TestBundlePagePathHost:
             )
         assert fetched == ["https://engagement.example/app"]
         assert "https://engagement.example/app" in gate.call_args.args[0]
+
+
+class TestAsmScreenshotConsent:
+    def _store(self):
+        store = MagicMock()
+        store.known_assets.return_value = [MagicMock(value="https://example.com")]
+        return store
+
+    def test_asm_screenshot_writes_gallery_without_tool_context(self, tmp_path):
+        out = tmp_path / "shots"
+        real = disc_mod.screenshot_surface.func
+        cli = MagicMock()
+        with (
+            patch.object(
+                disc_mod.screenshot_surface,
+                "func",
+                lambda urls: real(urls, out_dir=str(out)),
+            ),
+            patch.object(
+                browser_mod, "browser_navigate", MagicMock(return_value={"status": "error"})
+            ),
+        ):
+            asm_cmd._screenshot(cli, self._store(), "scope")
+        assert (out / "gallery.html").exists()
+
+    def test_agent_tool_context_without_approval_writes_nothing(self, tmp_path):
+        out = tmp_path / "shots"
+        with tool_execution_context(resume_decision=False):
+            result = disc_mod.screenshot_surface.func(["https://example.com"], out_dir=str(out))
+        assert "error" in result
+        assert not out.exists()
