@@ -264,6 +264,75 @@ class TestCampaignRunnerIntegration:
         assert runner._project_states["repo-a"].status == "queued"
 
 
+# --- Stop/resume lifecycle ----------------------------------------------------
+
+
+class TestStopResumeLifecycle:
+    def test_budget_stop_requeues_and_resume_finishes(self, tmp_path, monkeypatch):
+        """A project cancelled by a budget stop is requeued, not left 'running',
+        and a resume reschedules it so 'completed' means every project finished."""
+        import asyncio
+        from types import SimpleNamespace
+
+        import clearwing.providers as providers
+        import clearwing.sourcehunt.runner as runner_mod
+
+        runs: list[str] = []
+        state = {"resumed": False}
+
+        class FakeRunner:
+            def __init__(self, repo_url, **kw):
+                self.repo = repo_url
+
+            def _inject_campaign_pool(self, pool, db):
+                pass
+
+            async def arun(self):
+                runs.append(self.repo)
+                if self.repo.endswith("B") and not state["resumed"]:
+                    await asyncio.sleep(3600)
+                return SimpleNamespace(
+                    cost_usd=10.0, files_hunted=1, findings=[], verified_findings=[],
+                )
+
+        monkeypatch.setattr(runner_mod, "SourceHuntRunner", FakeRunner)
+        monkeypatch.setattr(providers, "resolve_llm_endpoint", lambda: None)
+        monkeypatch.setattr(
+            providers.ProviderManager, "for_endpoint", staticmethod(lambda e: None),
+        )
+
+        out = str(tmp_path)
+        targets = [
+            CampaignTargetConfig(repo="https://x/A", budget=10.0),
+            CampaignTargetConfig(repo="https://x/B", budget=10.0),
+        ]
+        cfg = CampaignConfig(
+            name="c", budget=10.0, targets=targets, output_dir=out,
+            checkpoint_interval_seconds=3600,
+        )
+        res = CampaignRunner(cfg).run()
+        assert res.status == "budget_exhausted"
+        # RunningMeansRunning: the cancelled project is not left marked running.
+        assert res.per_project_results["https://x/B"].status != "running"
+
+        state["resumed"] = True
+        runs.clear()
+        cfg2 = CampaignConfig(
+            name="c", budget=100.0, targets=targets, output_dir=out,
+            checkpoint_interval_seconds=3600,
+        )
+        r2 = asyncio.run(CampaignRunner.from_checkpoint(cfg2))
+        res2 = r2.run()
+        # Resume reschedules the requeued project and runs it to completion.
+        assert "https://x/B" in runs
+        assert res2.per_project_results["https://x/B"].status == "completed"
+        # CompletedMeansEveryProjectFinished.
+        if res2.status == "completed":
+            assert all(
+                ps.status == "completed" for ps in res2.per_project_results.values()
+            )
+
+
 # --- CLI registration ---------------------------------------------------------
 
 

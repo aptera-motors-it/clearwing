@@ -191,16 +191,6 @@ class DisclosureWorkflow:
         else:
             finding_dict = dict(finding_row)
 
-        self._db.transition(
-            finding_id, DisclosureState.PENDING_DISCLOSURE, reviewer,
-            "preparing disclosure",
-        )
-        self._db.transition(
-            finding_id, DisclosureState.DISCLOSED, reviewer,
-            "disclosure sent",
-        )
-        self._db.start_timeline(finding_id)
-
         generator = DisclosureGenerator(
             repo_url=repo_url or finding_row.get("repo_url", ""),
             reporter_name=reporter_name,
@@ -211,6 +201,23 @@ class DisclosureWorkflow:
         templates: dict[str, str] = {}
         for tmpl in bundle.templates:
             templates[tmpl.format] = tmpl.body
+
+        if not templates:
+            raise ValueError(
+                f"Finding {finding_id} has no vendor report to send "
+                f"(evidence below {generator.min_evidence_level}); "
+                "the disclosure clock was not started"
+            )
+
+        self._db.transition(
+            finding_id, DisclosureState.PENDING_DISCLOSURE, reviewer,
+            "preparing disclosure",
+        )
+        self._db.transition(
+            finding_id, DisclosureState.DISCLOSED, reviewer,
+            "disclosure sent",
+        )
+        self._db.start_timeline(finding_id)
 
         return templates
 

@@ -250,6 +250,11 @@ class RemediationWorkflow:
             if dynamic is None:
                 dynamic = await self._run_dynamic(finding, dto.proposed_fix.diff)
 
+            if self.policy.kill_switch_active(self.repo):
+                dto.status = "blocked"
+                self.store.save(dto)
+                return dto
+
             transaction = PatchTransaction(
                 self.repo,
                 dto.proposed_fix.diff,

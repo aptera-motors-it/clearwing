@@ -258,9 +258,13 @@ class CampaignRunner:
                 logger.info(
                     "Campaign stopping: %s", stopping_reason,
                 )
-                for t in tasks:
+                for t, cancelled_target in tasks.items():
                     if not t.done():
                         t.cancel()
+                        cancelled = self._project_states[cancelled_target.repo]
+                        if cancelled.status == "running":
+                            cancelled.status = "queued"
+                            cancelled.start_time = None
                 break
 
         checkpoint_task.cancel()

@@ -470,6 +470,39 @@ def test_resume_can_promote_reviewed_proposal_to_apply_without_regeneration(
         store.close()
 
 
+def test_kill_switch_during_dynamic_check_blocks_resume_apply(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    store = RemediationStore(tmp_path / "output")
+    try:
+        report = RemediationWorkflow(
+            repo=repo,
+            store=store,
+            remediator_llm=_RemediatorClient(),  # type: ignore[arg-type]
+            validation_panel=_WorkflowPanel("validated"),  # type: ignore[arg-type]
+        )
+        assert asyncio.run(report.run([_finding()]))[0].status == "proposed"
+
+        def dynamic_check(finding: dict, diff: str) -> DynamicValidation:
+            # The operator flips the kill switch while the dynamic check runs.
+            (repo / ".clearwing-remediation-off").write_text("stop\n", encoding="utf-8")
+            return DynamicValidation(attempted=True, passed=True, notes="mid-run")
+
+        apply = RemediationWorkflow(
+            repo=repo,
+            store=store,
+            remediator_llm=_RemediatorClient(),  # type: ignore[arg-type]
+            validation_panel=_WorkflowPanel("validated"),  # type: ignore[arg-type]
+            mode="apply",
+            dynamic_validator=dynamic_check,
+        )
+        dto = asyncio.run(apply.run([_finding()], resume=True))[0]
+        assert apply.policy.kill_switch_active(repo) is True
+        assert dto.status == "blocked"
+        assert (repo / "src/a.c").read_text(encoding="utf-8") == "int value = 0;\n"
+    finally:
+        store.close()
+
+
 def test_revalidation_updates_a_previously_validated_status(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     store = RemediationStore(tmp_path / "output")
