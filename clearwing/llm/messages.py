@@ -95,11 +95,15 @@ class ToolMessage(BaseMessage):
 
 
 def _normalize_role(role: str) -> str:
+    """Map a history message role onto a chat role.
+
+    ``system`` is demoted to ``user``: history (session summaries, restored
+    sessions, tool-derived text) must never reach the provider's system
+    prompt, which carries only the product prompt passed separately.
+    """
     normalized = role.strip().lower()
-    if normalized in {"human", "user"}:
+    if normalized in {"human", "user", "system"}:
         return "user"
-    if normalized in {"system"}:
-        return "system"
     if normalized in {"ai", "assistant"}:
         return "assistant"
     if normalized in {"tool"}:
@@ -135,24 +139,20 @@ def _tool_calls_to_chat_payload(tool_calls: Any) -> list[Any]:
     return normalized
 
 
-def _message_to_chat_message(message: Any) -> tuple[str | None, ChatMessage | None]:
+def _message_to_chat_message(message: Any) -> ChatMessage:
     if isinstance(message, str):
-        return None, ChatMessage.from_python(message)
+        return ChatMessage.from_python(message)
 
     if isinstance(message, ChatMessage):
         if message.role == "system":
-            return message.content, None
-        return None, message
+            return ChatMessage("user", message.content)
+        return message
 
     if isinstance(message, dict):
-        role = _normalize_role(str(message.get("role", "user")))
-        content = extract_text_content(message.get("content", ""))
-        if role == "system":
-            return content, None
         normalized = dict(message)
-        normalized["role"] = role
-        normalized["content"] = content
-        return None, ChatMessage.from_python(normalized)
+        normalized["role"] = _normalize_role(str(message.get("role", "user")))
+        normalized["content"] = extract_text_content(message.get("content", ""))
+        return ChatMessage.from_python(normalized)
 
     if isinstance(message, AIMessage):
         payload: dict[str, Any] = {
@@ -162,15 +162,11 @@ def _message_to_chat_message(message: Any) -> tuple[str | None, ChatMessage | No
         tool_calls = _tool_calls_to_chat_payload(message.tool_calls)
         if tool_calls:
             payload["tool_calls"] = tool_calls
-        return None, ChatMessage.from_python(payload)
+        return ChatMessage.from_python(payload)
 
-    role = _normalize_role(getattr(message, "role", getattr(message, "type", "user")))
-    content = extract_text_content(getattr(message, "content", message))
-    if role == "system":
-        return content, None
     payload = {
-        "role": role,
-        "content": content,
+        "role": _normalize_role(getattr(message, "role", getattr(message, "type", "user"))),
+        "content": extract_text_content(getattr(message, "content", message)),
         "tool_response_call_id": getattr(
             message,
             "tool_response_call_id",
@@ -178,21 +174,10 @@ def _message_to_chat_message(message: Any) -> tuple[str | None, ChatMessage | No
         ),
         "tool_calls": _tool_calls_to_chat_payload(getattr(message, "tool_calls", [])),
     }
-    return None, ChatMessage.from_python(payload)
+    return ChatMessage.from_python(payload)
 
 
-def _coerce_chat_messages(messages: Any) -> tuple[str | None, list[ChatMessage]]:
+def _coerce_chat_messages(messages: Any) -> list[ChatMessage]:
     if isinstance(messages, str | AIMessage | ChatMessage | dict):
         messages = [messages]
-
-    system_parts: list[str] = []
-    chat_messages: list[ChatMessage] = []
-    for message in messages or []:
-        system_text, chat_message = _message_to_chat_message(message)
-        if system_text:
-            system_parts.append(system_text)
-        if chat_message is not None:
-            chat_messages.append(chat_message)
-
-    system = "\n\n".join(part for part in system_parts if part).strip() or None
-    return system, chat_messages
+    return [_message_to_chat_message(message) for message in messages or []]
