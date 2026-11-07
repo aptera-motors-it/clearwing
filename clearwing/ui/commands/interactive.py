@@ -138,7 +138,18 @@ def _preflight_check(cli, args) -> bool:
 def _run_tui(cli, args, session=None):
     """Launch the Textual TUI."""
     session_id = session.session_id if session else None
-    app = ClearwingApp(
+
+    app_class = ClearwingApp
+    if session and session.messages:
+        class _ResumingClearwingApp(ClearwingApp):
+            def on_mount(self):
+                super().on_mount()
+                state = self._agent_graph.get_state(self._agent_config)
+                state.values.setdefault("messages", []).extend(session.messages)
+
+        app_class = _ResumingClearwingApp
+
+    app = app_class(
         target=args.target,
         model=args.model,
         session_id=session_id,
@@ -149,8 +160,14 @@ def _run_tui(cli, args, session=None):
 
     if session:
         try:
+            store = SessionStore()
+            session = store.load(session.session_id)
+            graph = getattr(app, "_agent_graph", None)
+            if graph is not None:
+                state = graph.get_state(app._agent_config)
+                session.messages = _persisted_messages(state.values.get("messages", []))
             session.status = "completed"
-            SessionStore().save(session)
+            store.save(session)
         except Exception:
             logger.debug("Failed to save session on TUI exit", exc_info=True)
 
