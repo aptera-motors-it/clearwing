@@ -148,6 +148,34 @@ def test_unix_endpoint_connects_to_socket_path():
             listener.close()
 
 
+@pytest.mark.skipif(os.getuid() == 0, reason="root peers are trusted")
+def test_unix_endpoint_rejects_a_peer_owned_by_another_user(monkeypatch):
+    with tempfile.TemporaryDirectory(prefix="cw-sb-", dir="/tmp") as directory:
+        path = Path(directory) / "sandbox.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(path))
+        listener.listen(1)
+        os.chmod(path, 0o666)
+        accepted: list[_RpcPeer] = []
+
+        def accept():
+            stream, _ = listener.accept()
+            accepted.append(_RpcPeer(stream, lambda request: request["params"]))
+
+        thread = threading.Thread(target=accept, daemon=True)
+        thread.start()
+        monkeypatch.setattr(os, "getuid", lambda: os.geteuid() + 1)
+        try:
+            with pytest.raises(SandboxRpcError, match="peer"):
+                JsonRpcConnection(f"unix://{path}")
+            thread.join(timeout=1)
+            assert [peer.requests for peer in accepted] == [[]]
+        finally:
+            for peer in accepted:
+                peer.close()
+            listener.close()
+
+
 def test_connection_multiplexes_out_of_order_responses():
     client_socket, server_socket = socket.socketpair()
     connection = JsonRpcConnection(f"fd://{client_socket.detach()}")

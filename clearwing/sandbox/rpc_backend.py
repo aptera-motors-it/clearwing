@@ -7,7 +7,9 @@ import binascii
 import itertools
 import json
 import logging
+import os
 import socket
+import struct
 import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -276,6 +278,7 @@ def _connect(endpoint: str) -> socket.socket:
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             connection.connect(parsed.path)
+            _require_trusted_peer(connection)
         except BaseException:
             connection.close()
             raise
@@ -305,6 +308,18 @@ def _connect(endpoint: str) -> socket.socket:
             raise ValueError("fd sandbox endpoint must already be connected") from error
         return connection
     raise ValueError("sandbox endpoint must use unix:///path or fd://N")
+
+
+def _require_trusted_peer(connection: socket.socket) -> None:
+    """Reject a pathname socket served by anyone other than this user or root."""
+    if not hasattr(socket, "SO_PEERCRED"):
+        raise SandboxRpcError("cannot verify the sandbox endpoint peer on this platform")
+    credentials = connection.getsockopt(
+        socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+    )
+    _pid, uid, _gid = struct.unpack("3i", credentials)
+    if uid not in (0, os.getuid()):
+        raise SandboxRpcError(f"sandbox endpoint peer uid {uid} is not this user or root")
 
 
 class SocketSandboxBackend:
