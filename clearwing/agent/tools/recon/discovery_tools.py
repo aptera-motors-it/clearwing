@@ -318,8 +318,8 @@ def screenshot_surface(urls: list[str], out_dir: str = "/tmp/asm-screenshots") -
 
     from clearwing.agent.tools.recon.browser_tools import browser_navigate, browser_screenshot
 
-    out = Path(out_dir)
-    if not interrupt(f"About to write screenshots and gallery to {out.expanduser().resolve()}"):
+    out = Path(out_dir).expanduser().resolve()
+    if not interrupt(f"About to write screenshots and gallery to {out}"):
         return {"error": "User declined screenshot output."}
     out.mkdir(parents=True, exist_ok=True)
     shots: list[dict] = []

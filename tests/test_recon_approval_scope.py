@@ -102,3 +102,94 @@ class TestMitmInjectDenied:
         with patch.object(mitm_mod, "interrupt", return_value=True):
             mitm_mod.mitm_inject_response.invoke({"url_pattern": "*/api/*", "body": "ok"})
         assert "*/api/*" in mitm_mod._inject_rules
+
+
+class TestPromptMatchesWrittenPath:
+    def test_proxy_export_tilde(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path / "..")
+        with (
+            patch.object(proxy_mod, "interrupt", return_value=True) as gate,
+            patch.object(proxy_mod._proxy_history, "export") as export,
+        ):
+            proxy_mod.proxy_export_history.invoke({"path": "~/h.json"})
+        assert gate.call_args.args[0].endswith(export.call_args.args[0])
+        assert export.call_args.args[0] == str(tmp_path / "h.json")
+
+    def test_browser_screenshot_tilde(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path / "..")
+        page = MagicMock()
+        with (
+            patch.object(browser_mod, "interrupt", return_value=True) as gate,
+            patch.object(browser_mod, "_get_page", return_value=page),
+        ):
+            browser_mod.browser_screenshot.invoke({"path": "~/s.png"})
+        written = page.screenshot.call_args.kwargs["path"]
+        assert gate.call_args.args[0].endswith(written)
+        assert written == str(tmp_path / "s.png")
+
+    def test_screenshot_surface_tilde(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        with (
+            patch.object(disc_mod, "interrupt", return_value=True) as gate,
+            patch.object(
+                browser_mod, "browser_navigate", MagicMock(return_value={"status": "error"})
+            ),
+        ):
+            result = disc_mod.screenshot_surface.invoke({"urls": [], "out_dir": "~/gallery"})
+        assert gate.call_args.args[0].endswith(str(tmp_path / "gallery"))
+        assert result["gallery"] == str(tmp_path / "gallery" / "gallery.html")
+        assert (tmp_path / "gallery" / "gallery.html").exists()
+        assert list(cwd.iterdir()) == []
+
+
+class TestBundlePagePathHost:
+    @pytest.mark.parametrize(
+        ("tool", "args"),
+        [
+            (bun_mod.fetch_js_bundles, {}),
+            (bun_mod.search_bundle_patterns, {}),
+            (bun_mod.extract_api_routes, {}),
+        ],
+    )
+    def test_at_host_page_path_never_requested(self, tool, args):
+        fetched: list[str] = []
+
+        def fake_fetch(url, timeout=30):
+            fetched.append(url)
+            return 200, "", 1.0
+
+        with (
+            patch.object(bun_mod, "interrupt", return_value=True),
+            patch.object(bun_mod, "_fetch_url", fake_fetch),
+        ):
+            result = tool.invoke(
+                {
+                    "target": "https://engagement.example",
+                    "page_path": "@169.254.169.254/latest/meta-data/",
+                    **args,
+                }
+            )
+        assert fetched == []
+        assert "error" in result
+
+    def test_prompt_names_fetched_url(self):
+        fetched: list[str] = []
+
+        def fake_fetch(url, timeout=30):
+            fetched.append(url)
+            return 0, "down", 0.0
+
+        with (
+            patch.object(bun_mod, "interrupt", return_value=True) as gate,
+            patch.object(bun_mod, "_fetch_url", fake_fetch),
+        ):
+            bun_mod.search_bundle_patterns.invoke(
+                {"target": "https://engagement.example", "page_path": "/app"}
+            )
+        assert fetched == ["https://engagement.example/app"]
+        assert "https://engagement.example/app" in gate.call_args.args[0]

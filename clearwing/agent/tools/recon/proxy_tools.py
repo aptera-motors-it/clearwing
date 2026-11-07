@@ -397,7 +397,7 @@ def proxy_export_history(path: str = "/tmp/proxy_history.json") -> dict:
     if not interrupt(f"About to write proxy history to {resolved}"):
         return {"success": False, "path": path, "error": "User declined export."}
     try:
-        _proxy_history.export(path)
+        _proxy_history.export(str(resolved))
         return {"success": True, "path": path, "entry_count": _proxy_history.count}
     except Exception as e:
         return {"success": False, "path": path, "error": str(e)}
