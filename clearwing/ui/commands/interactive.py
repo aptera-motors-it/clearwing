@@ -1,6 +1,7 @@
 """Interactive agent subcommand."""
 
 import asyncio
+import json
 import logging
 import os
 import socket
@@ -14,6 +15,7 @@ from clearwing.agent.runtime import Command
 from clearwing.agent.tools.ops.dynamic_tool_creator import get_custom_tools
 from clearwing.agent.tools.ops.kali_docker_tool import kali_cleanup
 from clearwing.data.memory import SessionStore
+from clearwing.llm.messages import extract_text_content
 from clearwing.observability.telemetry import CostTracker
 from clearwing.ui.tui import ClearwingApp
 
@@ -63,14 +65,20 @@ def handle(cli, args):
     store = SessionStore()
     resume_id = getattr(args, "resume", None)
     if resume_id:
-        session = store.load(resume_id)
-        if session:
-            cli.console.print(f"[green]Resuming session {session.session_id}[/green]")
-            args.target = session.target
-            args.model = session.model
-        else:
+        try:
+            session = store.load(resume_id)
+        except FileNotFoundError:
             cli.console.print(f"[red]Session {resume_id} not found.[/red]")
             return
+        except json.JSONDecodeError:
+            cli.console.print(f"[red]Session {resume_id} is corrupt.[/red]")
+            return
+        except (TypeError, ValueError):
+            cli.console.print(f"[red]Session {resume_id} could not be loaded.[/red]")
+            return
+        cli.console.print(f"[green]Resuming session {session.session_id}[/green]")
+        args.target = session.target
+        args.model = session.model
     else:
         session = store.create(target=args.target or "", model=args.model)
 
@@ -148,8 +156,14 @@ def _run_tui(cli, args, session=None):
 
     if session:
         try:
+            store = SessionStore()
+            session = store.load(session.session_id)
+            graph = getattr(app, "_agent_graph", None)
+            if graph is not None:
+                state = graph.get_state(app._agent_config)
+                session.messages = _persisted_messages(state.values.get("messages", []))
             session.status = "completed"
-            SessionStore().save(session)
+            store.save(session)
         except Exception:
             logger.debug("Failed to save session on TUI exit", exc_info=True)
 
@@ -173,6 +187,7 @@ def _run_interactive_legacy(cli, args, session=None):
     config = {"configurable": {"thread_id": thread_id}}
 
     initial_state = {
+        "messages": session.messages if session else [],
         "target": args.target,
         "open_ports": session.open_ports if session else [],
         "services": session.services if session else [],
@@ -233,8 +248,11 @@ def _run_interactive_legacy(cli, args, session=None):
 
         stream_printer.reset()
 
-        input_msg = {"messages": [{"role": "user", "content": user_input}]}
-        input_msg.update(initial_state)
+        input_msg = dict(initial_state)
+        input_msg["messages"] = [
+            *initial_state.get("messages", []),
+            {"role": "user", "content": user_input},
+        ]
         initial_state = {}
 
         async def _collect_events(g, msg) -> list:
@@ -258,9 +276,13 @@ def _run_interactive_legacy(cli, args, session=None):
                             if hasattr(task, "interrupts") and task.interrupts:
                                 for intr in task.interrupts:
                                     prompt = str(intr.value)
-                                    approved = Confirm.ask(
-                                        f"[bold yellow]APPROVAL REQUIRED:[/bold yellow] {prompt}"
-                                    )
+                                    try:
+                                        approved = Confirm.ask(
+                                            f"[bold yellow]APPROVAL REQUIRED:[/bold yellow] {prompt}"
+                                        )
+                                    except (EOFError, KeyboardInterrupt):
+                                        cli.console.print("\n[yellow]Interrupted.[/yellow]")
+                                        approved = False
                                     input_msg = Command(resume=approved)
                                     interrupted = True
                                     break
@@ -303,6 +325,7 @@ def _run_interactive_legacy(cli, args, session=None):
                     session.flags_found = sv.get("flags_found", session.flags_found)
                     session.cost_usd = sv.get("total_cost_usd", session.cost_usd)
                     session.token_count = sv.get("total_tokens", session.token_count)
+                    session.messages = _persisted_messages(sv.get("messages", []))
                     SessionStore().save(session)
                 except Exception:
                     logger.debug("Failed to save session mid-loop", exc_info=True)
@@ -336,3 +359,23 @@ def _run_interactive_legacy(cli, args, session=None):
             logger.debug("Failed to save final session state", exc_info=True)
 
     cli.console.print("[bold cyan]Session ended.[/bold cyan]")
+
+
+def _persisted_messages(messages: list) -> list[dict]:
+    persisted = []
+    for message in messages:
+        if isinstance(message, dict):
+            role = str(message.get("role", "user")).lower()
+            content = extract_text_content(message.get("content", ""))
+        else:
+            role = str(getattr(message, "role", getattr(message, "type", "user"))).lower()
+            content = extract_text_content(getattr(message, "content", ""))
+        if role in {"human", "user"}:
+            role = "user"
+        elif role in {"ai", "assistant"}:
+            role = "assistant"
+        else:
+            continue
+        if content:
+            persisted.append({"role": role, "content": content})
+    return persisted
