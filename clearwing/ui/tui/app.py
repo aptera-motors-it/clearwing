@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 from textual.app import App, ComposeResult
@@ -10,6 +11,7 @@ from textual.binding import Binding
 from textual.widgets import Footer, Header
 
 from clearwing.core.events import EventBus, EventType
+from clearwing.data.memory.session_store import SessionStore
 
 from .components.activity_feed import ActivityFeed
 from .components.input_bar import InputBar
@@ -19,6 +21,15 @@ from .screens.help_screen import HelpScreen
 from .screens.quit_screen import QuitScreen
 
 logger = logging.getLogger(__name__)
+
+_FINDING_KEYS = (
+    "open_ports",
+    "services",
+    "vulnerabilities",
+    "exploit_results",
+    "os_info",
+    "flags_found",
+)
 
 
 class ClearwingApp(App):
@@ -70,6 +81,10 @@ class ClearwingApp(App):
         self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
         self._approval_queue: asyncio.Queue[str] = asyncio.Queue()
         self._agent_graph = None
+        self._awaiting_approval = False
+        self._conversation: list[dict] = []
+        self._resume_gate = asyncio.Event()
+        self._resume_gate.set()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -122,6 +137,7 @@ class ClearwingApp(App):
 
     def on_unmount(self) -> None:
         """Unsubscribe from EventBus before the app tears down."""
+        self._save_findings()
         self._bus_mounted = False
         bus = EventBus()
         bus.unsubscribe(EventType.MESSAGE, self._on_bus_message)
@@ -291,23 +307,30 @@ class ClearwingApp(App):
         initial_state: dict = {}
         if self.target:
             initial_state["target"] = self.target
+        initial_state.update(self._saved_findings())
+        self._conversation = self._saved_conversation()
+        prior_messages = list(self._conversation)
 
         while True:
             user_text = await self._user_input_queue.get()
+            await self._resume_gate.wait()
 
             feed = self.query_one(ActivityFeed)
             feed.add_message(f"You: {user_text}", "info")
             feed.add_message("Thinking...", "warning")
 
-            input_msg: dict = {"messages": [{"role": "user", "content": user_text}]}
+            new_message = {"role": "user", "content": user_text}
+            self._conversation.append(new_message)
+            input_msg: dict = {"messages": [*prior_messages, new_message]}
+            prior_messages = []
             input_msg.update(initial_state)
             initial_state = {}
 
             try:
                 got_response = False
                 last_msg_count = 0
-                async for event in self._agent_graph.astream(
-                    input_msg, self._agent_config, stream_mode="values"
+                async for event in self._gated(
+                    self._agent_graph.astream(input_msg, self._agent_config, stream_mode="values")
                 ):
                     msgs = event.get("messages", [])
                     if len(msgs) <= last_msg_count:
@@ -323,6 +346,7 @@ class ClearwingApp(App):
                         text = extract_text_content(last.content)
                         if text:
                             feed.add_message(text, "success")
+                            self._conversation.append({"role": "assistant", "content": text})
                             got_response = True
 
                 if not got_response:
@@ -345,12 +369,17 @@ class ClearwingApp(App):
                                     f"APPROVAL NEEDED: {prompt}  (type 'yes' or 'no')",
                                     "warning",
                                 )
-                                answer = await self._user_input_queue.get()
+                                self._awaiting_approval = True
+                                try:
+                                    answer = await self._approval_queue.get()
+                                finally:
+                                    self._awaiting_approval = False
                                 approved = answer.strip().lower() in ("yes", "y", "approve")
+                                await self._resume_gate.wait()
                                 resume_input = Command(resume=approved)
                                 resume_msg_count = 0
-                                async for ev in self._agent_graph.astream(
-                                    resume_input, self._agent_config
+                                async for ev in self._gated(
+                                    self._agent_graph.astream(resume_input, self._agent_config)
                                 ):
                                     msgs = ev.get("messages", [])
                                     if len(msgs) <= resume_msg_count:
@@ -366,7 +395,11 @@ class ClearwingApp(App):
                                         text = extract_text_content(last.content)
                                         if text:
                                             feed.add_message(text, "success")
+                                            self._conversation.append(
+                                                {"role": "assistant", "content": text}
+                                            )
 
+                self._save_findings()
             except Exception as exc:
                 logger.exception("Agent loop error")
                 feed.add_message(f"Error: {exc}", "error")
@@ -375,8 +408,22 @@ class ClearwingApp(App):
     # Key binding actions
     # ------------------------------------------------------------------
 
+    async def _gated(self, stream):
+        """Yield from *stream*, waiting out any pause before each pull."""
+        events = aiter(stream)
+        while True:
+            await self._resume_gate.wait()
+            try:
+                yield await anext(events)
+            except StopAsyncIteration:
+                return
+
     def action_toggle_pause(self) -> None:
         self.paused = not self.paused
+        if self.paused:
+            self._resume_gate.clear()
+        else:
+            self._resume_gate.set()
         bar = self.query_one(StatusBar)
         bar.update_pause(self.paused)
         feed = self.query_one(ActivityFeed)
@@ -421,4 +468,47 @@ class ClearwingApp(App):
 
     def submit_input(self, text: str) -> None:
         """Called by InputBar when user submits."""
-        self._user_input_queue.put_nowait(text)
+        if self._awaiting_approval:
+            self._approval_queue.put_nowait(text)
+        else:
+            self._user_input_queue.put_nowait(text)
+
+    def _saved_findings(self) -> dict:
+        if not self.session_id:
+            return {}
+        try:
+            session = SessionStore().load(self.session_id)
+        except Exception:
+            logger.debug("Could not load session %s", self.session_id, exc_info=True)
+            return {}
+        return {key: getattr(session, key) for key in _FINDING_KEYS}
+
+    def _conversation_path(self):
+        # Not *.json: SessionStore.list_sessions globs that pattern.
+        return SessionStore().BASE_DIR / f"{self.session_id}.conversation"
+
+    def _saved_conversation(self) -> list[dict]:
+        if not self.session_id:
+            return []
+        try:
+            return json.loads(self._conversation_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+
+    def _save_findings(self) -> None:
+        if not (self.session_id and self._agent_graph):
+            return
+        try:
+            if self._conversation:
+                self._conversation_path().write_text(
+                    json.dumps(self._conversation), encoding="utf-8"
+                )
+            values = self._agent_graph.get_state(self._agent_config).values
+            store = SessionStore()
+            session = store.load(self.session_id)
+            for key in _FINDING_KEYS:
+                if key in values:
+                    setattr(session, key, values[key])
+            store.save(session)
+        except Exception:
+            logger.debug("Failed to save findings", exc_info=True)
