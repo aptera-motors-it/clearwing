@@ -29,6 +29,7 @@ class SessionInfo:
     os_info: str | None = None
     kali_container_id: str | None = None
     custom_tool_names: list[str] = field(default_factory=list)
+    messages: list[dict] = field(default_factory=list)
     thread_id: str = ""
     langgraph_thread_id: str = ""
 
@@ -87,7 +88,7 @@ class SessionStore:
 
     def save(self, session: SessionInfo) -> None:
         """Serialize *session* to JSON and write to BASE_DIR/{session_id}.json."""
-        path = self.BASE_DIR / f"{session.session_id}.json"
+        path = self._session_path(session.session_id)
         data = asdict(session)
         path.write_text(
             json.dumps(data, cls=_DateTimeEncoder, indent=2),
@@ -96,7 +97,7 @@ class SessionStore:
 
     def load(self, session_id: str) -> SessionInfo:
         """Load a session from disk by its ID."""
-        path = self.BASE_DIR / f"{session_id}.json"
+        path = self._session_path(session_id)
         if not path.exists():
             raise FileNotFoundError(f"Session file not found: {path}")
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -130,6 +131,13 @@ class SessionStore:
 
     def delete(self, session_id: str) -> None:
         """Remove the session file for *session_id*."""
-        path = self.BASE_DIR / f"{session_id}.json"
+        path = self._session_path(session_id)
         if path.exists():
             path.unlink()
+
+    def _session_path(self, session_id: str) -> Path:
+        base = self.BASE_DIR.resolve()
+        path = (self.BASE_DIR / f"{session_id}.json").resolve()
+        if not path.is_relative_to(base):
+            raise ValueError("Session ID escapes the sessions directory")
+        return path
