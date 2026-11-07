@@ -14,6 +14,7 @@ from clearwing.agent.tools.hunt import (
     build_verification_tools,
 )
 from clearwing.llm import BudgetExceeded
+from clearwing.sandbox.backend import SandboxRunConfig
 from clearwing.sandbox.container import ExecResult
 from clearwing.sourcehunt.checkpoints import SourceHuntCheckpoint
 from clearwing.sourcehunt.dynamic_verification import (
@@ -29,6 +30,8 @@ from clearwing.sourcehunt.verifier import Verifier, VerifierResult
 
 
 class _FakeSandbox:
+    config = SandboxRunConfig()
+
     def __init__(self, exec_result: ExecResult | None = None) -> None:
         self.commands: list[object] = []
         self.stop_calls = 0

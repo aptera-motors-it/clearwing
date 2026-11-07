@@ -27,6 +27,8 @@ from .container import ExecResult
 
 _STARTUP_TIMEOUT_SECONDS = 120
 _DEADLINE_FLOOR_SECONDS = 900
+_SANDBOX_LABELS = {"app.kubernetes.io/managed-by": "clearwing", "purpose": "sandbox"}
+_NETWORK_POLICY_NAME = "clearwing-sandbox-deny-all"
 
 
 def kubernetes_namespace() -> str:
@@ -104,6 +106,8 @@ class KubernetesSandboxBackend:
             )
         if config.mounts:
             raise ValueError("Kubernetes sandbox does not accept host-path mounts")
+        if config.network_mode != "none":
+            raise ValueError("Kubernetes sandbox only supports network_mode 'none'")
         return KubernetesSandbox(
             environment_ref,
             config,
@@ -178,7 +182,7 @@ class KubernetesSandbox:
             metadata=client.V1ObjectMeta(
                 name=pod_name,
                 namespace=self.namespace,
-                labels={"app.kubernetes.io/managed-by": "clearwing", "purpose": "sandbox"},
+                labels=_SANDBOX_LABELS,
             ),
             spec=client.V1PodSpec(
                 automount_service_account_token=False,
@@ -207,6 +211,7 @@ class KubernetesSandbox:
             ),
         )
         api = self._api_factory()
+        self._deny_sandbox_network(api)
         api.create_namespaced_pod(self.namespace, pod)
         self._pod_name = pod_name
         try:
@@ -215,6 +220,31 @@ class KubernetesSandbox:
             self.stop()
             raise
         return pod_name
+
+    def _deny_sandbox_network(self, api: Any) -> None:
+        """Apply the namespace policy that denies all sandbox pod traffic.
+
+        Never deleted, so a terminating pod stays isolated. Policies are additive: another
+        policy selecting these pods can re-allow traffic, and the CNI must enforce them.
+        """
+        from kubernetes import client
+
+        policy = client.V1NetworkPolicy(
+            metadata=client.V1ObjectMeta(name=_NETWORK_POLICY_NAME, namespace=self.namespace),
+            spec=client.V1NetworkPolicySpec(
+                pod_selector=client.V1LabelSelector(match_labels=_SANDBOX_LABELS),
+                policy_types=["Ingress", "Egress"],
+            ),
+        )
+        networking = client.NetworkingV1Api(api.api_client)
+        try:
+            networking.create_namespaced_network_policy(self.namespace, policy)
+        except client.ApiException as error:
+            if error.status != 409:
+                raise
+            networking.replace_namespaced_network_policy(
+                _NETWORK_POLICY_NAME, self.namespace, policy
+            )
 
     def _wait_until_running(self, api: Any) -> None:
         deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS

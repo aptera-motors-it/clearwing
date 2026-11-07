@@ -488,6 +488,7 @@ class TestAdversarialVerifierDefault:
         verdict_response.tool_calls = []
         verifier_llm.achat.side_effect = [tool_response, verdict_response]
         sandbox = MagicMock()
+        sandbox.config.network_mode = "none"
         sandbox.exec.return_value = ExecResult(0, "", "", 0.01)
         runner = SourceHuntRunner(
             repo_url=str(FIXTURE_PY_SQLI),

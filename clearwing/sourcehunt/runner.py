@@ -3039,13 +3039,7 @@ class SourceHuntRunner:
                 build_verification_tools,
             )
 
-            sandbox_config = getattr(sandbox, "config", None)
-            network_mode = getattr(sandbox_config, "network_mode", None)
-            if (
-                sandbox_config is not None
-                and isinstance(network_mode, str)
-                and network_mode != "none"
-            ):
+            if getattr(getattr(sandbox, "config", None), "network_mode", None) != "none":
                 raise RuntimeError("verification sandbox must disable networking")
             if (
                 hasattr(sandbox, "workspace_baseline_commit")
