@@ -310,6 +310,26 @@ class TestDisclosureWorkflow:
         finally:
             db.close()
 
+    def test_send_disclosure_without_report_does_not_start_clock(self):
+        db = _tmp_db()
+        try:
+            # crash_reproduced is below the disclosure generator threshold, so no
+            # vendor template is produced. The 90-day clock must not start when
+            # there is no report to send the vendor.
+            db.queue_findings(
+                [_make_finding(id="f1", evidence_level="crash_reproduced")],
+                "https://repo", "s",
+            )
+            db.transition("f1", DisclosureState.IN_REVIEW)
+            db.transition("f1", DisclosureState.VALIDATED)
+            wf = DisclosureWorkflow(db)
+            with pytest.raises(ValueError, match="no vendor report"):
+                wf.send_disclosure("f1", repo_url="https://repo")
+            assert db.get_finding("f1")["state"] == "validated"
+            assert not db.get_timeline("f1")
+        finally:
+            db.close()
+
     def test_batch_max_5(self):
         db = _tmp_db()
         try:
