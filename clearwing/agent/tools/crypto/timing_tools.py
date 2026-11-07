@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import math
 import random
+import statistics
 import time
 import urllib.error
 import urllib.request
@@ -16,6 +19,21 @@ from clearwing.crypto.stats import (
     compute_stats,
     welch_t_test,
 )
+
+
+def _request_summary(
+    target: str,
+    method: str,
+    path: str,
+    headers: dict | None,
+    body: str,
+) -> str:
+    header_names = sorted((headers or {}).keys())
+    body_digest = hashlib.sha256(body.encode()).hexdigest()[:12] if body else "none"
+    return (
+        f"{method.upper()} {target.rstrip('/')}{path} "
+        f"(headers={header_names}, body_len={len(body)}, body_sha256={body_digest})"
+    )
 
 
 def _timed_request(
@@ -85,7 +103,8 @@ def timing_probe(
         return {"error": "Need at least 5 samples for meaningful statistics."}
 
     total = warmup + samples
-    if not interrupt(f"About to send {total} requests to {target}{path} for timing analysis"):
+    request = _request_summary(target, method, path, headers, body)
+    if not interrupt(f"About to send {total} requests for timing analysis: {request}"):
         return {"error": "User declined timing probe."}
 
     url = f"{target.rstrip('/')}{path}"
@@ -177,7 +196,11 @@ def timing_compare(
         return {"error": "Need at least 10 samples (5 per group) for meaningful comparison."}
 
     total = warmup + samples * 2
-    if not interrupt(f"About to send {total} requests to {target} for timing comparison"):
+    request_a = _request_summary(target, method_a, path_a, headers_a, body_a)
+    request_b = _request_summary(target, method_b, path_b, headers_b, body_b)
+    if not interrupt(
+        f"About to send {total} requests for timing comparison: A={request_a}; B={request_b}"
+    ):
         return {"error": "User declined timing comparison."}
 
     url_a = f"{target.rstrip('/')}{path_a}"
@@ -226,14 +249,11 @@ def timing_compare(
     d = cohens_d(clean_a, clean_b)
     significant = p_value < 0.05
 
-    import statistics as _st
-
-    mean_diff = _st.mean(clean_a) - _st.mean(clean_b)
-    import math
+    mean_diff = statistics.mean(clean_a) - statistics.mean(clean_b)
 
     se_diff = math.sqrt(
-        (_st.variance(clean_a) / len(clean_a) if len(clean_a) > 1 else 0)
-        + (_st.variance(clean_b) / len(clean_b) if len(clean_b) > 1 else 0)
+        (statistics.variance(clean_a) / len(clean_a) if len(clean_a) > 1 else 0)
+        + (statistics.variance(clean_b) / len(clean_b) if len(clean_b) > 1 else 0)
     )
     margin = 1.96 * se_diff
     diff_ci = (round(mean_diff - margin, 3), round(mean_diff + margin, 3))
@@ -389,8 +409,9 @@ def timing_bitwise_probe(
         return {"error": "Need at least 3 samples per candidate."}
 
     total = warmup + len(charset) * samples_per_candidate
+    request = _request_summary(target, method, path, headers, body_template)
     if not interrupt(
-        f"About to send {total} requests to {target}{path} for bitwise timing probe "
+        f"About to send {total} requests for bitwise timing probe: {request} "
         f"(charset={len(charset)} chars, {samples_per_candidate} samples each)"
     ):
         return {"error": "User declined bitwise probe."}

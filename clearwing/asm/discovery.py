@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from clearwing.agent.tools.recon import discovery_tools as dt
 from clearwing.asm.assets import Asset
@@ -77,6 +78,9 @@ def _discover_domain(
 
     if opts.wayback:
         for url in _safe(dt.wayback_urls, domain, default=[])[:5000]:
+            hostname = urlparse(url).hostname
+            if not hostname or not scope.in_scope(hostname):
+                continue
             assets.append(Asset(scope.name, "url", url, parent_id=domain_id, source="wayback"))
 
     resolvable: list[str] = []

@@ -1,5 +1,12 @@
 import clearwing.scanning as scanning
-from clearwing.agent.tooling import tool
+from clearwing.agent.tooling import _TOOL_ACTIVE, interrupt, tool
+
+
+def _scan_approved(action: str, target: str, details: str = "") -> bool:
+    if not _TOOL_ACTIVE.get():
+        return True
+    suffix = f" ({details})" if details else ""
+    return interrupt(f"Approve {action} against target {target}{suffix}?")
 
 
 @tool
@@ -20,6 +27,10 @@ async def scan_ports(
     Returns:
         List of open port info dicts with keys: port, protocol, state, service.
     """
+    port_scope = f"ports={ports or 'common'}, type={scan_type}, threads={threads}"
+    if not _scan_approved("port scan", target, port_scope):
+        return [{"error": f"User declined port scan against {target}"}]
+
     scanner = scanning.PortScanner()
     return await scanner.scan(target, ports or [], scan_type, threads)
 
@@ -35,6 +46,10 @@ async def detect_services(target: str, open_ports: list[dict]) -> list[dict]:
     Returns:
         List of service info dicts with keys: port, service, banner, version, protocol.
     """
+    ports = [item.get("port") for item in open_ports]
+    if not _scan_approved("service detection", target, f"ports={ports}"):
+        return [{"error": f"User declined service detection against {target}"}]
+
     scanner = scanning.ServiceScanner()
     return await scanner.detect(target, open_ports)
 
@@ -50,6 +65,17 @@ async def scan_vulnerabilities(target: str, services: list[dict]) -> list[dict]:
     Returns:
         List of vulnerability dicts with keys: cve, description, cvss, port, service.
     """
+    service_scope = [
+        {
+            "port": item.get("port"),
+            "service": item.get("service"),
+            "version": item.get("version"),
+        }
+        for item in services
+    ]
+    if not _scan_approved("vulnerability scan", target, f"services={service_scope}"):
+        return [{"error": f"User declined vulnerability scan against {target}"}]
+
     scanner = scanning.VulnerabilityScanner()
     try:
         return await scanner.scan(target, services)
@@ -67,6 +93,9 @@ async def detect_os(target: str) -> str:
     Returns:
         Detected OS string (e.g. 'Linux/Unix', 'Windows') or 'Unknown'.
     """
+    if not _scan_approved("OS detection", target):
+        return f"User declined OS detection against {target}"
+
     scanner = scanning.OSScanner()
     return await scanner.detect(target)
 
