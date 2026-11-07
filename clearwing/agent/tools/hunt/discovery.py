@@ -106,6 +106,7 @@ def _normalize_path(repo_path: str, path: str) -> str:
 _SEMGREP_REGISTRY_CONFIG = re.compile(
     r"^[pr]/[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
 )
+_SEMGREP_RULES_FILE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_./-]*$")
 
 
 def _resolve_semgrep_config(repo_path: str, config: str) -> str:
@@ -115,7 +116,7 @@ def _resolve_semgrep_config(repo_path: str, config: str) -> str:
         return "p/security-audit"
     if _SEMGREP_REGISTRY_CONFIG.match(value):
         return value
-    resolved = resolve_repo_file(repo_path, value)
+    resolved = resolve_repo_file(repo_path, value) if _SEMGREP_RULES_FILE.match(value) else None
     if resolved is None:
         raise ValueError(f"semgrep config must be a registry id or a repo rules file: {config}")
     return str(resolved)

@@ -4,9 +4,6 @@ import os
 import tempfile
 import textwrap
 from pathlib import Path
-from unittest.mock import patch
-
-import pytest
 
 from clearwing.agent.tools.hunt import HunterContext, build_semgrep_tool
 from clearwing.analysis.source_analyzer import AnalysisResult, AnalyzerFinding, SourceAnalyzer
@@ -458,30 +455,30 @@ class TestTaintFlow:
 
 
 class TestSemgrepScanConfigConfinement:
-    def _run_scan(self, repo: Path, config: str):
-        ctx = HunterContext(repo_path=str(repo))
-        tool = build_semgrep_tool(ctx)
-        completed = type("Proc", (), {"returncode": 0, "stdout": '{"results": []}', "stderr": ""})()
-        with (
-            patch(
-                "clearwing.sourcehunt.semgrep_sidecar.SemgrepSidecar._command",
-                return_value="semgrep",
-            ),
-            patch(
-                "clearwing.sourcehunt.semgrep_sidecar.subprocess.run", return_value=completed
-            ) as run,
-        ):
-            result = tool.invoke({"path": ".", "config": config})
-        return result, run
+    """Audit #28: semgrep_scan must not feed model-chosen host paths to --config."""
 
     @staticmethod
-    def _configs(run) -> list[str]:
-        cmd = run.call_args.args[0]
+    def _run_scan(monkeypatch, repo: Path, config: str):
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return type("Proc", (), {"returncode": 0, "stdout": '{"results": []}', "stderr": ""})()
+
+        monkeypatch.setattr(
+            "clearwing.sourcehunt.semgrep_sidecar.SemgrepSidecar._command",
+            lambda self: "semgrep",
+        )
+        monkeypatch.setattr("clearwing.sourcehunt.semgrep_sidecar.subprocess.run", fake_run)
+        tool = build_semgrep_tool(HunterContext(repo_path=str(repo)))
+        return tool.invoke({"path": ".", "config": config}), calls
+
+    @staticmethod
+    def _configs(cmd: list[str]) -> list[str]:
         return [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--config"]
 
-    @pytest.mark.parametrize(
-        "config",
-        [
+    def test_host_paths_and_urls_are_rejected(self, monkeypatch, tmp_path: Path):
+        for config in (
             "/etc/passwd",
             "../../etc/passwd",
             "file:///etc/passwd",
@@ -489,37 +486,60 @@ class TestSemgrepScanConfigConfinement:
             "missing-rules.yaml",
             "p/../../etc/passwd",
             "p/security-audit --metrics=on",
-        ],
-    )
-    def test_host_paths_and_urls_are_rejected(self, tmp_path: Path, config: str):
-        result, run = self._run_scan(tmp_path, config)
+        ):
+            result, calls = self._run_scan(monkeypatch, tmp_path, config)
+            assert "error" in result[0], config
+            assert calls == [], config
+
+    def test_url_shaped_config_is_rejected_even_when_a_repo_file_matches(
+        self, monkeypatch, tmp_path: Path
+    ):
+        lookalike = tmp_path / "https:" / "example.test" / "rules.yaml"
+        lookalike.parent.mkdir(parents=True)
+        lookalike.write_text("rules: []\n")
+
+        result, calls = self._run_scan(monkeypatch, tmp_path, "https://example.test/rules.yaml")
 
         assert "error" in result[0]
-        run.assert_not_called()
+        assert calls == []
 
-    def test_symlink_to_host_file_is_rejected(self, tmp_path: Path):
+    def test_option_suffix_is_rejected_even_when_a_repo_file_matches(
+        self, monkeypatch, tmp_path: Path
+    ):
+        (tmp_path / "rules.yaml").write_text("rules: []\n")
+        (tmp_path / "rules.yaml --metrics=on").write_text("rules: []\n")
+
+        for config in ("rules.yaml --metrics=on", "rules.yaml --metrics=on\n--config=/etc/passwd"):
+            result, calls = self._run_scan(monkeypatch, tmp_path, config)
+            assert "error" in result[0], config
+            assert calls == [], config
+
+    def test_symlink_to_host_file_is_rejected(self, monkeypatch, tmp_path: Path):
         secret = tmp_path / "outside.creds"
         secret.write_text("TOKEN=host-secret\n")
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / "rules.yaml").symlink_to(secret)
 
-        result, run = self._run_scan(repo, "rules.yaml")
+        result, calls = self._run_scan(monkeypatch, repo, "rules.yaml")
 
         assert "error" in result[0]
-        run.assert_not_called()
+        assert calls == []
 
-    @pytest.mark.parametrize("config", ["", "p/security-audit", "r/python.lang.security"])
-    def test_registry_configs_are_passed_through(self, tmp_path: Path, config: str):
-        _result, run = self._run_scan(tmp_path, config)
+    def test_registry_configs_are_passed_through(self, monkeypatch, tmp_path: Path):
+        for config, expected in (
+            ("", "p/security-audit"),
+            ("p/security-audit", "p/security-audit"),
+            ("r/python.lang.security", "r/python.lang.security"),
+        ):
+            _result, calls = self._run_scan(monkeypatch, tmp_path, config)
+            assert self._configs(calls[0])[0] == expected
 
-        assert self._configs(run)[0] == (config or "p/security-audit")
-
-    def test_repo_relative_rule_file_is_allowed(self, tmp_path: Path):
+    def test_repo_relative_rule_file_is_allowed(self, monkeypatch, tmp_path: Path):
         (tmp_path / "rules").mkdir()
         rule = tmp_path / "rules" / "mine.yaml"
         rule.write_text("rules: []\n")
 
-        _result, run = self._run_scan(tmp_path, "rules/mine.yaml")
+        _result, calls = self._run_scan(monkeypatch, tmp_path, "rules/mine.yaml")
 
-        assert self._configs(run)[0] == str(rule.resolve())
+        assert self._configs(calls[0])[0] == str(rule.resolve())
