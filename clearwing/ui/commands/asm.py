@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
+from clearwing.agent.tooling import tool_execution_context
 from clearwing.asm.assets import AssetStore
 from clearwing.asm.scope import Scope, ScopeError
 
@@ -264,7 +265,8 @@ def _screenshot(cli, store, scope_name) -> None:
     urls = [a.value for a in store.known_assets(scope_name, "host")]
     if not urls:
         return
-    result = screenshot_surface.func(urls)
+    with tool_execution_context(resume_decision=True):
+        result = screenshot_surface.func(urls)
     cli.console.print(f"[green]Gallery:[/green] {result.get('gallery')}")
 
 

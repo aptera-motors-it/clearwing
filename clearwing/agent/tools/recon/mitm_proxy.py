@@ -361,10 +361,11 @@ def mitm_inject_response(
     Returns:
         Dict confirming the rule was set or removed.
     """
-    interrupt(
+    if not interrupt(
         f"MITM response injection requested for pattern '{url_pattern}'. "
         f"This will modify live traffic. Approve?"
-    )
+    ):
+        return {"error": "User declined response injection.", "url_pattern": url_pattern}
 
     if remove:
         removed = _inject_rules.pop(url_pattern, None)

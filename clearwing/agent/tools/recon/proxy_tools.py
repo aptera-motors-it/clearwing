@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from clearwing.agent.tooling import tool
+from clearwing.agent.tooling import interrupt, tool
 
 
 class _ExactCaseHTTPMixin:
@@ -393,8 +393,11 @@ def proxy_export_history(path: str = "/tmp/proxy_history.json") -> dict:
     Returns:
         Dict with keys: success, path, entry_count.
     """
+    resolved = Path(path).expanduser().resolve()
+    if not interrupt(f"About to write proxy history to {resolved}"):
+        return {"success": False, "path": path, "error": "User declined export."}
     try:
-        _proxy_history.export(path)
+        _proxy_history.export(str(resolved))
         return {"success": True, "path": path, "entry_count": _proxy_history.count}
     except Exception as e:
         return {"success": False, "path": path, "error": str(e)}

@@ -7,6 +7,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import urlparse
 
 from clearwing.agent.tooling import interrupt, tool
 
@@ -50,21 +51,29 @@ def _fetch_url(url: str, timeout: int = 30) -> tuple[int, str, float]:
         return 0, str(e), (time.time() - start) * 1000
 
 
+def _page_url(target: str, page_path: str) -> str | None:
+    """Join target and page_path, or None if the result is on a different host."""
+    url = f"{target.rstrip('/')}{page_path}"
+    if urlparse(url).netloc != urlparse(target).netloc:
+        return None
+    return url
+
+
 def _extract_script_urls(html: str, base_url: str) -> list[str]:
     """Extract script src URLs from HTML."""
     urls: list[str] = []
+    base_host = urlparse(base_url).netloc
     for match in re.finditer(r'<script[^>]+src\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE):
         src = match.group(1)
         if src.startswith("//"):
             src = "https:" + src
         elif src.startswith("/"):
-            from urllib.parse import urlparse
-
             parsed = urlparse(base_url)
             src = f"{parsed.scheme}://{parsed.netloc}{src}"
         elif not src.startswith("http"):
             src = base_url.rstrip("/") + "/" + src
-        urls.append(src)
+        if urlparse(src).netloc == base_host:
+            urls.append(src)
     return urls
 
 
@@ -92,10 +101,12 @@ def fetch_js_bundles(
     Returns:
         Dict with bundle URLs, sizes, and download status.
     """
-    if not interrupt(f"About to fetch JS bundles from {target}{page_path}"):
+    page_url = _page_url(target, page_path)
+    if page_url is None:
+        return {"error": "page_path must stay on the target host."}
+    if not interrupt(f"About to fetch JS bundles from {page_url}"):
         return {"error": "User declined bundle fetch."}
 
-    page_url = f"{target.rstrip('/')}{page_path}"
     status, html, _ = _fetch_url(page_url)
     if status == 0:
         return {"error": f"Failed to fetch page: {html}"}
@@ -170,9 +181,11 @@ def search_bundle_patterns(
     if bundles is None:
         if not target:
             return {"error": "Either bundles or target must be provided."}
-        if not interrupt(f"About to fetch and search JS bundles from {target}"):
+        page_url = _page_url(target, page_path)
+        if page_url is None:
+            return {"error": "page_path must stay on the target host."}
+        if not interrupt(f"About to fetch and search JS bundles from {page_url}"):
             return {"error": "User declined bundle search."}
-        page_url = f"{target.rstrip('/')}{page_path}"
         _, html, _ = _fetch_url(page_url)
         script_urls = _extract_script_urls(html, target.rstrip("/"))
         bundles = []
@@ -262,9 +275,11 @@ def extract_api_routes(  # noqa: C901
     if bundles is None:
         if not target:
             return {"error": "Either bundles or target must be provided."}
-        if not interrupt(f"About to fetch and analyze JS bundles from {target}"):
+        page_url = _page_url(target, page_path)
+        if page_url is None:
+            return {"error": "page_path must stay on the target host."}
+        if not interrupt(f"About to fetch and analyze JS bundles from {page_url}"):
             return {"error": "User declined route extraction."}
-        page_url = f"{target.rstrip('/')}{page_path}"
         _, html, _ = _fetch_url(page_url)
         script_urls = _extract_script_urls(html, target.rstrip("/"))
         bundles = []

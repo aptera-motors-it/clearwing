@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from clearwing.agent.tooling import interrupt, tool
@@ -256,9 +257,12 @@ def browser_screenshot(tab_name: str = "default", path: str = "/tmp/screenshot.p
     Returns:
         Dict with keys: success, path, tab_name.
     """
+    resolved = Path(path).expanduser().resolve()
+    if not interrupt(f"About to write screenshot to {resolved}"):
+        return {"success": False, "path": path, "tab_name": tab_name, "error": "User declined screenshot."}
     try:
         page = _get_page(tab_name)
-        page.screenshot(path=path, full_page=True)
+        page.screenshot(path=str(resolved), full_page=True)
         return {"success": True, "path": path, "tab_name": tab_name}
     except Exception as e:
         return {"success": False, "path": path, "tab_name": tab_name, "error": str(e)}
