@@ -4,7 +4,11 @@ import os
 import tempfile
 import textwrap
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
+
+from clearwing.agent.tools.hunt import HunterContext, build_semgrep_tool
 from clearwing.analysis.source_analyzer import AnalysisResult, AnalyzerFinding, SourceAnalyzer
 from clearwing.analysis.taint_tracker import TAINT_SINKS, TAINT_SOURCES, TaintFlow, TaintTracker
 
@@ -451,3 +455,71 @@ class TestTaintFlow:
         assert "sql_injection" in s
         assert "CRITICAL" in s
         assert "app.py" in s
+
+
+class TestSemgrepScanConfigConfinement:
+    def _run_scan(self, repo: Path, config: str):
+        ctx = HunterContext(repo_path=str(repo))
+        tool = build_semgrep_tool(ctx)
+        completed = type("Proc", (), {"returncode": 0, "stdout": '{"results": []}', "stderr": ""})()
+        with (
+            patch(
+                "clearwing.sourcehunt.semgrep_sidecar.SemgrepSidecar._command",
+                return_value="semgrep",
+            ),
+            patch(
+                "clearwing.sourcehunt.semgrep_sidecar.subprocess.run", return_value=completed
+            ) as run,
+        ):
+            result = tool.invoke({"path": ".", "config": config})
+        return result, run
+
+    @staticmethod
+    def _configs(run) -> list[str]:
+        cmd = run.call_args.args[0]
+        return [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--config"]
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            "/etc/passwd",
+            "../../etc/passwd",
+            "file:///etc/passwd",
+            "https://example.test/rules.yaml",
+            "missing-rules.yaml",
+            "p/../../etc/passwd",
+            "p/security-audit --metrics=on",
+        ],
+    )
+    def test_host_paths_and_urls_are_rejected(self, tmp_path: Path, config: str):
+        result, run = self._run_scan(tmp_path, config)
+
+        assert "error" in result[0]
+        run.assert_not_called()
+
+    def test_symlink_to_host_file_is_rejected(self, tmp_path: Path):
+        secret = tmp_path / "outside.creds"
+        secret.write_text("TOKEN=host-secret\n")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "rules.yaml").symlink_to(secret)
+
+        result, run = self._run_scan(repo, "rules.yaml")
+
+        assert "error" in result[0]
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("config", ["", "p/security-audit", "r/python.lang.security"])
+    def test_registry_configs_are_passed_through(self, tmp_path: Path, config: str):
+        _result, run = self._run_scan(tmp_path, config)
+
+        assert self._configs(run)[0] == (config or "p/security-audit")
+
+    def test_repo_relative_rule_file_is_allowed(self, tmp_path: Path):
+        (tmp_path / "rules").mkdir()
+        rule = tmp_path / "rules" / "mine.yaml"
+        rule.write_text("rules: []\n")
+
+        _result, run = self._run_scan(tmp_path, "rules/mine.yaml")
+
+        assert self._configs(run)[0] == str(rule.resolve())

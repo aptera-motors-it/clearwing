@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import uuid
 
 from clearwing.llm import NativeToolSpec, ToolInputModel
@@ -242,11 +243,20 @@ def build_analysis_tools(ctx: HunterContext) -> list:
 
         basename = os.path.splitext(os.path.basename(rel))[0]
         out_path = f"/scratch/{basename}-{uuid.uuid4().hex[:6]}.bin"
+        try:
+            flags = shlex.split(extra_flags)
+        except ValueError as e:
+            return {"success": False, "error": f"invalid extra_flags: {e}"}
         cmd = [
-            "sh",
-            "-c",
-            f"gcc -fsanitize={san_flags} -g -O0 -fno-omit-frame-pointer "
-            f"{extra_flags} -o {out_path} {_container_path(rel)} 2>&1",
+            "gcc",
+            f"-fsanitize={san_flags}",
+            "-g",
+            "-O0",
+            "-fno-omit-frame-pointer",
+            *flags,
+            "-o",
+            out_path,
+            _container_path(rel),
         ]
         result = target_sandbox.exec(cmd, timeout=120)
         return {
@@ -289,9 +299,9 @@ def build_analysis_tools(ctx: HunterContext) -> list:
 
         argv_list = [binary] + (argv or [])
         if stdin:
-            # Pipe stdin via shell
-            quoted = stdin.replace("'", "'\\''")
-            cmd = ["sh", "-c", f"echo '{quoted}' | {' '.join(argv_list)}"]
+            stdin_path = f"/scratch/stdin-{uuid.uuid4().hex[:8]}"
+            target_sandbox.write_file(stdin_path, stdin.encode("utf-8"))
+            cmd = ["sh", "-c", 'exec "$@" < "$0"', stdin_path, *argv_list]
         else:
             cmd = argv_list
 

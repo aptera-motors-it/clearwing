@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from clearwing.agent.tools.hunt import HunterContext, build_analysis_tools
 from clearwing.sandbox.builders import BuildSystemDetector
+from clearwing.sandbox.container import ExecResult
 from clearwing.sandbox.hunter_sandbox import HunterSandbox
 
 
@@ -298,3 +301,130 @@ class TestHunterSandboxSpawn:
         sb.build_image()
         sb.cleanup(remove_image=True)
         mock_docker.images.remove.assert_called_once()
+
+
+# --- Analysis tools: no shell interpolation --------------------------------
+
+
+class _LocalSandbox:
+    """Runs sandbox argv on the host with /scratch mapped to a temp dir.
+
+    gcc is swapped for echo so the test observes exactly what a shell would
+    have done with the argv without needing a compiler.
+    """
+
+    def __init__(self, scratch: Path):
+        self.scratch = scratch
+        self.commands: list[list[str]] = []
+
+    def _map(self, value: str) -> str:
+        if value.startswith("/scratch/"):
+            return str(self.scratch) + value[len("/scratch") :]
+        return value
+
+    def exec(self, command, timeout=None, env=None, workdir=None) -> ExecResult:
+        assert isinstance(command, list)
+        self.commands.append(command)
+        argv = [self._map(part) for part in command]
+        if argv[0] == "gcc":
+            argv[0] = "echo"
+        proc = subprocess.run(argv, capture_output=True, text=True, cwd=self.scratch)
+        return ExecResult(proc.returncode, proc.stdout, proc.stderr, 0.0)
+
+    def write_file(self, path: str, content: bytes) -> None:
+        Path(self._map(path)).write_bytes(content)
+
+
+@pytest.fixture
+def analysis_env(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    scratch = tmp_path / "sbx"
+    scratch.mkdir()
+    sandbox = _LocalSandbox(scratch)
+    ctx = HunterContext(repo_path=str(repo), sandbox=sandbox)
+    tools = {t.name: t for t in build_analysis_tools(ctx)}
+    return repo, scratch, sandbox, tools
+
+
+class TestAnalysisToolsShellInjection:
+    def test_compile_file_extra_flags_metacharacters_do_not_execute(self, analysis_env):
+        repo, scratch, sandbox, tools = analysis_env
+        (repo / "a.c").write_text("int main(void){return 0;}\n")
+        marker = scratch / "pwned"
+
+        result = tools["compile_file"].invoke(
+            {
+                "file_path": "a.c",
+                "extra_flags": f"-DX=1; touch {marker}; $(touch {marker}) `touch {marker}`",
+            }
+        )
+
+        assert not marker.exists()
+        assert result["success"] is True
+        assert "touch" in result["stdout"]
+        assert sandbox.commands[-1][0] == "gcc"
+        assert "sh" not in sandbox.commands[-1]
+
+    def test_compile_file_filename_metacharacters_do_not_execute(self, analysis_env):
+        repo, scratch, sandbox, tools = analysis_env
+        (repo / "x;touch pwned;.c").write_text("int main(void){return 0;}\n")
+        marker = scratch / "pwned"
+
+        result = tools["compile_file"].invoke({"file_path": "x;touch pwned;.c"})
+
+        assert not marker.exists()
+        assert result["success"] is True
+        assert sandbox.commands[-1][0] == "gcc"
+
+    def test_compile_file_rejects_unparseable_extra_flags(self, analysis_env):
+        repo, _scratch, sandbox, tools = analysis_env
+        (repo / "a.c").write_text("int main(void){return 0;}\n")
+
+        result = tools["compile_file"].invoke({"file_path": "a.c", "extra_flags": "-DX='oops"})
+
+        assert result["success"] is False
+        assert "error" in result
+        assert sandbox.commands == []
+
+    def test_run_with_sanitizer_stdin_metacharacters_do_not_execute(self, analysis_env):
+        _repo, scratch, sandbox, tools = analysis_env
+        marker = scratch / "pwned"
+
+        result = tools["run_with_sanitizer"].invoke(
+            {
+                "binary": "/bin/echo",
+                "argv": [
+                    f"; touch {marker}",
+                    f"$(touch {marker})",
+                    f"`touch {marker}`",
+                    f"&& touch {marker}",
+                ],
+                "stdin": "data",
+            }
+        )
+
+        assert not marker.exists()
+        assert result["exit_code"] == 0
+        assert f"; touch {marker}" in result["stdout"]
+        assert f"$(touch {marker})" in result["stdout"]
+
+    def test_run_with_sanitizer_binary_metacharacters_do_not_execute(self, analysis_env):
+        _repo, scratch, _sandbox, tools = analysis_env
+        marker = scratch / "pwned"
+
+        result = tools["run_with_sanitizer"].invoke(
+            {"binary": f"/bin/true; touch {marker}", "stdin": "data"}
+        )
+
+        assert not marker.exists()
+        assert result["exit_code"] != 0
+
+    def test_run_with_sanitizer_still_delivers_stdin_verbatim(self, analysis_env):
+        _repo, _scratch, _sandbox, tools = analysis_env
+        payload = 'it\'s a "quoted" $HOME `payload`\nsecond line'
+
+        result = tools["run_with_sanitizer"].invoke({"binary": "/bin/cat", "stdin": payload})
+
+        assert result["exit_code"] == 0
+        assert result["stdout"] == payload

@@ -103,6 +103,24 @@ def _normalize_path(repo_path: str, path: str) -> str:
     return resolved.relative_to(Path(repo_path).resolve()).as_posix()
 
 
+_SEMGREP_REGISTRY_CONFIG = re.compile(
+    r"^[pr]/[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+)
+
+
+def _resolve_semgrep_config(repo_path: str, config: str) -> str:
+    """Accept only a Semgrep registry id or a rules file inside the repo."""
+    value = config.strip()
+    if not value:
+        return "p/security-audit"
+    if _SEMGREP_REGISTRY_CONFIG.match(value):
+        return value
+    resolved = resolve_repo_file(repo_path, value)
+    if resolved is None:
+        raise ValueError(f"semgrep config must be a registry id or a repo rules file: {config}")
+    return str(resolved)
+
+
 def _container_path(rel_path: str) -> str:
     """Turn a repo-relative path into the path inside the /workspace mount."""
     rel_path = rel_path.replace("\\", "/")
@@ -391,15 +409,20 @@ def build_semgrep_tool(ctx: HunterContext) -> NativeToolSpec:
 
         Args:
             path: Repo-relative file or directory to scan. Default = repo root.
-            config: Additional semgrep config, e.g. 'p/security-audit'. Optional.
+            config: Semgrep registry id (e.g. 'p/security-audit') or a repo-relative
+                rules file. Optional.
         """
         try:
             rel = _normalize_path(ctx.repo_path, path)
         except ValueError as e:
             return [{"error": str(e)}]
+        try:
+            semgrep_config = _resolve_semgrep_config(ctx.repo_path, config)
+        except ValueError as e:
+            return [{"error": str(e)}]
         scan_path = os.path.join(ctx.repo_path, rel)
         sidecar = SemgrepSidecar(
-            config=config if config else "p/security-audit",
+            config=semgrep_config,
             respect_gitignore=False,
         )
         if not sidecar.available:
