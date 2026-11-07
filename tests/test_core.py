@@ -1,7 +1,9 @@
 import pytest
 
+import clearwing.core.engine as eng
 from clearwing.core import Config, CoreEngine, ScanConfig
 from clearwing.core.engine import ScanState
+from clearwing.ui.cli import CLI
 
 
 class TestConfig:
@@ -70,6 +72,17 @@ class TestCoreEngine:
         """Test report generation from engine."""
         report = engine.get_report("text")
         assert isinstance(report, str)
+
+    def test_failed_scan_cli_exits_nonzero(self, monkeypatch, tmp_path):
+        async def boom(self, *args, **kwargs):
+            raise PermissionError("raw sockets need root")
+
+        monkeypatch.setenv("CLEARWING_HOME", str(tmp_path))
+        monkeypatch.setattr(eng.PortScanner, "scan", boom)
+
+        with pytest.raises(SystemExit) as exc_info:
+            CLI().run(["scan", "127.0.0.1", "-p", "22"])
+        assert exc_info.value.code != 0
 
 
 class TestScanConfig:

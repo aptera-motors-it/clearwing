@@ -62,6 +62,8 @@ class CLI:
             aliases = getattr(cmd_module, "ALIASES", ())
             if parsed_args.command == cmd_name or parsed_args.command in aliases:
                 cmd_module.handle(self, parsed_args)
+                if self._engine is not None and self._engine.scan_result.state.value == "error":
+                    raise SystemExit(1)
                 return
 
         parser.print_help()
